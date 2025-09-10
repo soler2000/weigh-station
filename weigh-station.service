@@ -9,7 +9,7 @@ WorkingDirectory=/home/pi/weigh-station
 Environment="PYTHONUNBUFFERED=1"
 # Optional: configure pins with env if not using D5/D6
 # Environment="DATA_PIN=D5" "CLOCK_PIN=D6"
-ExecStart=/home/pi/weigh-station/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+ExecStart=/home/pi/weigh-station/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 6000
 Restart=on-failure
 
 [Install]
