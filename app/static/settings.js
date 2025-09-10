@@ -75,4 +75,23 @@ document.getElementById('btn-known').onclick = async () => {
   document.getElementById('calib-msg').textContent = res.ok ? 'Scale factor saved.' : 'Calibration failed.';
 };
 
+document.getElementById('btn-del-events').onclick = async () => {
+  const token = prompt('Type DELETE to remove ALL weigh logs');
+  if (token !== 'DELETE') return;
+  const res = await fetch('/api/admin/delete-events?confirm=DELETE', { method: 'POST' });
+  alert(res.ok ? 'All weigh logs deleted.' : 'Delete failed.');
+};
+
+document.getElementById('btn-factory-reset').onclick = async () => {
+  const token = prompt('Type RESET to factory reset (logs + variants + calibration). This cannot be undone.');
+  if (token !== 'RESET') return;
+  const res = await fetch('/api/admin/factory-reset?confirm=RESET', { method: 'POST' });
+  if (res.ok) {
+    alert('Factory reset complete. Variants reseeded.');
+    loadTable();
+  } else {
+    alert('Factory reset failed.');
+  }
+};
+
 window.addEventListener('load', loadTable);
