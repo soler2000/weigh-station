@@ -146,14 +146,21 @@ async def ws_weight(ws: WebSocket):
     except Exception:
         await ws.close()
 
-# --- Commit a weighing
+# --- Commit a weighing (now enforces non-blank + unique serial)
 @app.post("/api/weigh/commit", response_model=WeighEventOut)
-def commit(variant_id: int, serial: str = Query(..., min_length=1)):
-    latest = reader.read_latest()
+def commit(variant_id: int, serial: str = Query(...)):
+    serial = (serial or "").strip()
+    if not serial:
+        raise HTTPException(400, "Serial cannot be blank.")
     with Session() as s:
+        # Enforce global uniqueness of serial across all variants
+        dup = s.query(WeighEvent).filter(WeighEvent.serial == serial).first()
+        if dup:
+            raise HTTPException(409, "Serial already used.")
         v = s.get(Variant, variant_id)
         if not v:
             raise HTTPException(404, "Variant not found")
+        latest = reader.read_latest()
         g = float(latest["g"])
         in_range = (v.min_g <= g <= v.max_g)
         evt = WeighEvent(variant_id=variant_id, serial=serial,
@@ -163,6 +170,17 @@ def commit(variant_id: int, serial: str = Query(..., min_length=1)):
             id=evt.id, ts=evt.ts.isoformat(), variant_id=evt.variant_id,
             serial=evt.serial, gross_g=evt.gross_g, net_g=evt.net_g, in_range=evt.in_range
         )
+
+# --- Stats (pass/fail counters, optional by variant)
+@app.get("/api/stats")
+def stats(variant_id: Optional[int] = None):
+    with Session() as s:
+        q = s.query(WeighEvent)
+        if variant_id:
+            q = q.filter(WeighEvent.variant_id == variant_id)
+        pass_count = q.filter(WeighEvent.in_range.is_(True)).count()
+        fail_count = q.filter(WeighEvent.in_range.is_(False)).count()
+        return {"pass": pass_count, "fail": fail_count, "total": pass_count + fail_count}
 
 # --- CSV export
 @app.get("/export.csv")
