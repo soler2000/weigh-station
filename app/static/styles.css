@@ -1,3 +1,50 @@
+:root {
+  --bg-green: #0a0;
+  --bg-red:   #a00;
+  --bg-neu:   #222;
+  --fg:       #fff;
+}
+
+* { box-sizing: border-box; }
+html, body, main { height: 100%; margin: 0; }
+body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+
+#panel {
+  height: 100%;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  color: var(--fg); gap: 1.5rem;
+  transition: background-color .15s ease-in-out;
+}
+
+#panel.green  { background: var(--bg-green); }
+#panel.red    { background: var(--bg-red); }
+#panel.neutral{ background: var(--bg-neu); }
+
+#weight {
+  font-size: min(20vw, 200px);
+  font-weight: 900;
+  line-height: 1;
+  text-shadow: 0 2px 8px rgba(0,0,0,.35);
+}
+
+form {
+  position: fixed; bottom: 2rem;
+  display: flex; gap: .5rem; background: rgba(0,0,0,.2);
+  padding: .5rem; border-radius: .5rem;
+}
+
+input, select, button {
+  font-size: 1.1rem; padding: .4rem .6rem; border-radius: .3rem;
+  border: none;
+}
+
+#dl, #settings {
+  position: fixed; top: 1rem; color: #fff; text-decoration: none;
+  background: rgba(0,0,0,.35); padding: .4rem .6rem; border-radius: .3rem;
+}
+#dl { right: 1rem; }
+#settings { left: 1rem; }
 #stats {
   position: fixed;
   top: 1rem; left: 50%;
