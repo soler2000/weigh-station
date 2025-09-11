@@ -198,6 +198,11 @@ def export_csv(frm: Optional[str] = None, to: Optional[str] = None, variant: Opt
     return StreamingResponse(output, media_type="text/csv",
                              headers={"Content-Disposition": "attachment; filename=weigh_export.csv"})
 
+# Debug: latest reading (for polling fallback / quick checks)
+@app.get("/api/debug/latest")
+def debug_latest():
+    return reader.read_latest()
+
 # --- Health
 @app.get("/api/health")
 def health():
