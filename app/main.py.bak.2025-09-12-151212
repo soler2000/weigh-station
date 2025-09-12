@@ -22,6 +22,33 @@ engine = create_engine(f"sqlite:///{DATA_DIR}/weigh.db", future=True, connect_ar
 Session = sessionmaker(engine, expire_on_commit=False, future=True)
 Base.metadata.create_all(engine)
 
+# === Runtime Tare Layer (in grams) ===========================================
+### RUNTIME_TARE_START
+from threading import Lock
+RUNTIME_TARE_G = 0.0        # grams to subtract from computed net for display + save
+RUNTIME_TARE_LOCK = Lock()
+LATEST_NET_G = 0.0          # snapshot of the most recent net grams (before runtime tare)
+
+def apply_runtime_tare(net_g: float) -> float:
+    try:
+        with RUNTIME_TARE_LOCK:
+            return float(net_g) - float(RUNTIME_TARE_G)
+    except Exception:
+        return net_g
+
+@app.post("/api/tare")
+def api_tare():
+    """
+    Make the CURRENT reading zero by setting runtime tare in grams.
+    Does not modify calibration scale/offset. Idempotent.
+    """
+    global RUNTIME_TARE_G
+    with RUNTIME_TARE_LOCK:
+        # Use the latest measured net (before runtime tare) so that (net - tare) -> 0
+        tare_to_set = float(LATEST_NET_G)
+        RUNTIME_TARE_G = tare_to_set
+    return {"ok": True, "runtime_tare_g": RUNTIME_TARE_G}
+### RUNTIME_TARE_END
 
 app = FastAPI(title="Weigh Station")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -157,7 +184,7 @@ def commit(variant_id: int, serial: str = Query(...)):
 def stats(variant_id: Optional[int] = None):
     try:
         # apply runtime tare for saved values
-        net_g = (net_g)
+        net_g = apply_runtime_tare(net_g)
     except Exception:
         pass
     with Session() as s:
