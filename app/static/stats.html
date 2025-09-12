@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Weigh Station – Statistics</title>
+  <!-- Self-contained CSS so this page never breaks -->
+  <style>
+    :root{
+      --bg:#0f1115; --panel:#161a22; --border:#2a2f3a; --text:#e8eaed; --muted:#a3aab7; --accent:#7aa2ff;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial,sans-serif}
+    header{position:sticky;top:0;background:rgba(22,26,34,.9);backdrop-filter:saturate(120%) blur(6px);border-bottom:1px solid var(--border);z-index:5}
+    .nav{max-width:1100px;margin:0 auto;padding:10px 14px;display:flex;gap:16px;align-items:center}
+    .nav a{color:var(--accent);text-decoration:none}
+    .nav a:hover{text-decoration:underline}
+    main{max-width:1100px;margin:0 auto;padding:14px}
+    .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px;margin:0 0 16px 0;box-shadow:0 4px 12px rgba(0,0,0,.18)}
+    .row{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+    label{color:var(--muted)}
+    select,input,button{background:#0c0f14;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:1rem}
+    button{cursor:pointer}
+    button:hover{filter:brightness(1.05)}
+    table{width:100%;border-collapse:separate;border-spacing:0 8px}
+    th{color:var(--muted);text-align:left;font-weight:500;padding-right:14px;white-space:nowrap}
+    td{font-weight:700}
+    .chartBox{width:100%;height:840px;position:relative} /* 2× taller */
+    canvas{width:100%;height:100%;display:block;background:#0c0f14;border:1px solid var(--border);border-radius:10px}
+    .legend{margin-top:10px;color:var(--muted)}
+  </style>
+</head>
+<body>
+<header>
+  <div class="nav">
+    <a href="/">Home</a>
+    <a href="/settings">Settings</a>
+    <strong style="flex:1">Statistics</strong>
+    <a href="/export">Export</a>
+  </div>
+</header>
+
+<main>
+  <div class="card">
+    <div class="row">
+      <label for="variant">Variant</label>
+      <select id="variant" style="min-width:220px"></select>
+      <label for="from" style="margin-left:8px">From</label><input id="from" type="date">
+      <label for="to">To</label><input id="to" type="date">
+      <label for="bins">Bins</label><input id="bins" type="number" min="5" max="200" value="20" style="width:90px">
+      <button id="refresh">Refresh</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <table>
+      <tbody>
+        <tr>
+          <th>Total</th><td id="t_total">0</td>
+          <th>Pass</th><td id="t_pass">0</td>
+          <th>Fail</th><td id="t_fail">0</td>
+        </tr>
+        <tr>
+          <th>Mean</th><td id="t_mean">–</td>
+          <th>σ</th><td id="t_sigma">–</td>
+          <th>Cp</th><td id="t_cp">–</td>
+        </tr>
+        <tr>
+          <th>Cpk</th><td id="t_cpk">–</td>
+          <th>Spec</th><td id="t_spec" colspan="3">–</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="chartBox"><canvas id="hist"></canvas></div>
+    <div class="legend" id="legend"></div>
+  </div>
+</main>
+
+<script>
+const sel=document.getElementById('variant'),fromI=document.getElementById('from'),toI=document.getElementById('to'),binsI=document.getElementById('bins');
+const btn=document.getElementById('refresh'),cvs=document.getElementById('hist'),ctx=cvs.getContext('2d'),legend=document.getElementById('legend');
+function fmt(x,d=3){return(x===null||x===undefined||Number.isNaN(Number(x)))?'–':Number(x).toFixed(d);}
+async function loadVariants(){
+  try{
+    const r=await fetch('/api/variants',{cache:'no-store'});
+    const vs=await r.json();
+    sel.innerHTML=vs.map(v=>`<option value="${v.id}" data-min="${v.min_g}" data-max="${v.max_g}">${v.name} [${v.min_g}-${v.max_g} g]</option>`).join('');
+    const now=new Date(), d7=new Date(now.getTime()-6*86400000);
+    toI.value=now.toISOString().slice(0,10); fromI.value=d7.toISOString().slice(0,10);
+  }catch(e){ console.error(e); alert('Failed to load variants'); }
+}
+function drawHistogram(edges,counts,lsl,usl){
+  const W=cvs.clientWidth,H=cvs.clientHeight; cvs.width=W; cvs.height=H;
+  const left=55,right=20,top=24,bottom=44,x0=left,x1=W-right,y0=H-bottom,y1=top;
+  ctx.clearRect(0,0,W,H);
+  // axes
+  ctx.strokeStyle='#6b7280'; ctx.lineWidth=1; ctx.beginPath();
+  ctx.moveTo(x0,y0); ctx.lineTo(x1,y0); ctx.moveTo(x0,y0); ctx.lineTo(x0,y1); ctx.stroke();
+  // y grid + ticks
+  ctx.fillStyle='#a3aab7'; ctx.font='12px system-ui';
+  const maxC=Math.max(1,...counts), ticks=4;
+  for(let i=0;i<=ticks;i++){
+    const c=i*maxC/ticks, y=y0-(y0-y1)*(c/maxC);
+    ctx.fillText(String(Math.round(c)), 8, y+4);
+    ctx.strokeStyle='#22262f'; ctx.beginPath(); ctx.moveTo(x0,y); ctx.lineTo(x1,y); ctx.stroke();
+  }
+  // bars
+  const n=counts.length, band=(x1-x0)/n;
+  for(let i=0;i<n;i++){
+    const h=(y0-y1)*(counts[i]/maxC), bx=x0+i*band+1, bw=Math.max(1,band-2);
+    ctx.fillStyle='#7aa2ff'; ctx.globalAlpha=.55; ctx.fillRect(bx,y0-h,bw,h); ctx.globalAlpha=1;
+  }
+  // spec lines
+  if(edges.length>1){
+    const lo=edges[0], hi=edges[edges.length-1], xOf=v=>x0+(v-lo)/(hi-lo)*(x1-x0);
+    ctx.strokeStyle='#ff5858'; ctx.setLineDash([6,4]);
+    if(lsl!=null&&lsl>lo&&lsl<hi){ const x=xOf(lsl); ctx.beginPath(); ctx.moveTo(x,y0); ctx.lineTo(x,y1); ctx.stroke(); }
+    if(usl!=null&&usl>lo&&usl<hi){ const x=xOf(usl); ctx.beginPath(); ctx.moveTo(x,y0); ctx.lineTo(x,y1); ctx.stroke(); }
+    ctx.setLineDash([]);
+    // x labels (min/mid/max)
+    ctx.fillStyle='#a3aab7'; ctx.textAlign='center';
+    ctx.fillText(lo.toFixed(2), x0, H-10);
+    ctx.fillText(((lo+hi)/2).toFixed(2), (x0+x1)/2, H-10);
+    ctx.fillText(hi.toFixed(2), x1, H-10);
+  }
+}
+async function refresh(){
+  const id=sel.value; if(!id){alert('Choose a variant');return;}
+  const q=new URLSearchParams(); q.set('variant_id',id);
+  if(fromI.value) q.set('frm',fromI.value); if(toI.value) q.set('to',toI.value);
+  q.set('bins',binsI.value||'20');
+  const r=await fetch('/api/stats/distribution?'+q.toString(),{cache:'no-store'});
+  if(!r.ok){alert('Failed to load stats');return;}
+  const d=await r.json();
+  // KPIs
+  document.getElementById('t_total').textContent=d.count??0;
+  document.getElementById('t_pass').textContent =d.pass??0;
+  document.getElementById('t_fail').textContent =d.fail??0;
+  document.getElementById('t_mean').textContent =fmt(d.mean,3);
+  document.getElementById('t_sigma').textContent=fmt(d.stdev,3);
+  document.getElementById('t_cp').textContent   =fmt(d.cp,3);
+  document.getElementById('t_cpk').textContent  =fmt(d.cpk,3);
+  document.getElementById('t_spec').textContent =`LSL=${fmt(d.lsl,2)} g • USL=${fmt(d.usl,2)} g`;
+  // Chart
+  const edges=d.bins?.edges||[], counts=d.bins?.counts||[];
+  if(edges.length>1 && counts.length>0){
+    drawHistogram(edges,counts,d.lsl,d.usl);
+    legend.textContent=`Spec: LSL=${fmt(d.lsl,2)} g • USL=${fmt(d.usl,2)} g • Yield=${fmt(d.yield,3)}`;
+  }else{
+    ctx.clearRect(0,0,cvs.width,cvs.height);
+    legend.textContent='No data in the selected range.';
+  }
+}
+// wire up
+document.getElementById('refresh').addEventListener('click', refresh);
+(async function(){ await loadVariants(); await refresh(); })();
+</script>
+</body>
+</html>

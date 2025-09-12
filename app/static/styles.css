@@ -57,3 +57,76 @@ input, select, button {
   z-index: 5;
 }
 #stats b { min-width: 2.5ch; display: inline-block; text-align: right; }
+/* Stats page link */
+#statsLink {
+  position: fixed; top: 1rem; left: 6.5rem; color: #fff; text-decoration: none;
+  background: rgba(0,0,0,.35); padding: .4rem .6rem; border-radius: .3rem;
+}
+
+/* === Stats page tweaks (scoped) === */
+.stats-kpis .kpi .num {
+  font-size: clamp(1.8rem, 3.6vw, 3rem);
+  line-height: 1.15;
+  word-break: break-word;
+}
+.stats-caps .kpi .num {
+  font-size: clamp(1.2rem, 2.6vw, 2rem);
+  line-height: 1.15;
+  word-break: break-word;
+}
+.chartBox { min-height: 420px; }
+.row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.row select, .row input, .row button { min-height: 38px; }
+@media (max-width: 640px){
+  .row select, .row input { flex: 1 1 100%; min-width: 200px; }
+}
+
+/* === Stats page layout guards === */
+.stats-kpis .kpi .num { font-size: clamp(1.6rem, 3.2vw, 2.6rem); line-height: 1.15; word-break: break-word; }
+.stats-caps .kpi .num { font-size: clamp(1.2rem, 2.4vw, 2.0rem); line-height: 1.15; word-break: break-word; }
+.chartBox { min-height: 420px; }
+.row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.row select, .row input, .row button { min-height: 38px; }
+@media (max-width: 640px){
+  .row select, .row input { flex: 1 1 100%; min-width: 200px; }
+}
+
+/* Stats: bigger histogram */
+.chartBox { height: 840px; min-height: 840px; }
+@media (max-width: 640px){
+  .chartBox { height: 560px; min-height: 560px; }
+}
+
+/* Stats page: bigger histogram */
+.chartBox { height: 840px; min-height: 840px; }
+@media (max-width: 640px){
+  .chartBox { height: 560px; min-height: 560px; }
+}
+
+/* ===== Weigh Station – Stats page overrides (scoped, safe) ===== */
+main .grid.stats-layout { display: grid !important; gap: 16px !important; grid-template-columns: 1fr !important; }
+@media (min-width: 900px){
+  main .grid.stats-layout { grid-template-columns: 1fr !important; }
+}
+
+/* Controls row */
+main .stats-controls.row { display: flex !important; flex-wrap: wrap !important; gap: 12px !important; align-items: center !important; }
+main .stats-controls.row select,
+main .stats-controls.row input,
+main .stats-controls.row button { min-height: 38px !important; }
+
+/* KPI blocks */
+main .kpis.stats-kpis,
+main .caps.stats-caps { display: grid !important; gap: 12px !important; }
+main .kpis.stats-kpis { grid-template-columns: repeat(3, minmax(140px, 1fr)) !important; }
+main .caps.stats-caps { grid-template-columns: repeat(4, minmax(120px, 1fr)) !important; }
+
+main .kpi { border: 1px solid #e5e7eb !important; border-radius: 10px !important; padding: 10px !important; text-align: center !important; background: var(--card-bg, #fff) !important; }
+main .kpi .num { font-size: clamp(1.6rem, 3vw, 2.4rem) !important; line-height: 1.2 !important; word-break: break-word !important; }
+
+/* Histogram 2× taller */
+main .chartBox { height: 840px !important; min-height: 840px !important; }
+@media (max-width: 640px){
+  main .chartBox { height: 560px !important; min-height: 560px !important; }
+}
+main .legend { margin-top: 10px !important; font-size: .95rem !important; color: #444 !important; }

@@ -23,7 +23,6 @@
     </form>
     <a href="/export.csv" id="dl" download>Download CSV</a>
     <a href="/settings" id="settings">⚙ Settings</a>
-    <a href="/stats" id="statsLink">📊 Stats</a>
   </main>
   <script src="/static/app.js?v=3"></script>
 </body>
