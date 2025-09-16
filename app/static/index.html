@@ -34,7 +34,7 @@
       <a href="/" class="active">Home</a>
       <a href="/settings">Settings</a>
       <a href="/stats">Stats</a>
-      <a href="/export">Export</a>
+      <a id="exportLink" href="/export.csv">Export</a>
     </nav>
   </header>
 
@@ -63,7 +63,6 @@
           <button id="saveBtn">Save</button>
           <button id="tareBtn">Tare</button>
           <button id="calBtn">Calibrate</button>
-          <button id="csvBtn">Download CSV</button>
         </div>
 
         <div class="kpis">
@@ -176,7 +175,13 @@ window.addEventListener('load', ()=>{
   $('saveBtn').addEventListener('click', doSave);
   $('tareBtn').addEventListener('click', doTare);
   $('calBtn'). addEventListener('click', doCal);
-  $('csvBtn'). addEventListener('click', exportCsv);
+  const exportLink = $('exportLink');
+  if(exportLink){
+    exportLink.addEventListener('click', ev => {
+      ev.preventDefault();
+      exportCsv();
+    });
+  }
   $('serial').focus();
 });
 </script>
