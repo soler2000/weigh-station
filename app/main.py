@@ -1,11 +1,11 @@
-import asyncio, csv, io, os
+import asyncio, csv, io, os, json
 from typing import List, Optional
 from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Path as FPath
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, func, case
 from sqlalchemy.orm import sessionmaker
 from app.models import Base, Variant, Calibration, WeighEvent
 from app.hx711_reader import ScaleReader
@@ -69,6 +69,39 @@ def index():
 @app.get("/settings", response_class=HTMLResponse)
 def settings():
     return (STATIC_DIR / "settings.html").read_text(encoding="utf-8")
+
+@app.get("/production", response_class=HTMLResponse)
+def production_output_page():
+    html = (STATIC_DIR / "production.html").read_text(encoding="utf-8")
+    with Session() as s:
+        variants = (
+            s.query(Variant)
+            .order_by(Variant.id.asc())
+            .all()
+        )
+        payload = [
+            dict(
+                id=v.id,
+                name=v.name,
+                min_g=v.min_g,
+                max_g=v.max_g,
+                unit=v.unit,
+                enabled=v.enabled,
+            )
+            for v in variants
+        ]
+
+    bootstrap_json = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
+    injection = (
+        '<script id="production-variant-data" type="application/json">'
+        + bootstrap_json
+        + "</script>"
+    )
+    if "</body>" in html:
+        html = html.replace("</body>", injection + "\n</body>", 1)
+    else:
+        html = html + injection
+    return HTMLResponse(content=html)
 # --- Variant CRUD
 @app.get("/api/variants", response_model=List[VariantOut])
 def list_variants():
@@ -184,6 +217,109 @@ def stats(variant_id: Optional[int] = None):
         pass_count = q.filter(WeighEvent.in_range.is_(True)).count()
         fail_count = q.filter(WeighEvent.in_range.is_(False)).count()
         return {"pass": pass_count, "fail": fail_count, "total": pass_count + fail_count}
+
+@app.get("/api/production/output")
+def production_output(
+    interval: str = Query("day", pattern="^(day|hour)$"),
+    start: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    variant_id: Optional[int] = Query(None, ge=1),
+):
+    interval = (interval or "day").lower()
+    if interval not in {"day", "hour"}:
+        raise HTTPException(400, "interval must be 'day' or 'hour'")
+
+    def parse_iso_date(value: Optional[str], label: str):
+        if value in (None, ""):
+            return None
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(400, f"{label} must be YYYY-MM-DD")
+
+    start_date = parse_iso_date(start, "start")
+    end_date = parse_iso_date(end, "end")
+    today = datetime.utcnow().date()
+    if end_date is None:
+        end_date = today
+    if start_date is None:
+        start_date = end_date - timedelta(days=6)
+    if start_date > end_date:
+        raise HTTPException(400, "start must be on or before end")
+
+    start_dt = datetime.combine(start_date, time.min)
+    end_dt = datetime.combine(end_date + timedelta(days=1), time.min)
+
+    bucket_labels: List[str] = []
+    if interval == "day":
+        max_days = 180
+        day_count = (end_date - start_date).days + 1
+        if day_count > max_days:
+            raise HTTPException(400, f"Date range too large for daily view (max {max_days} days).")
+        current = start_date
+        while current <= end_date:
+            bucket_labels.append(current.isoformat())
+            current += timedelta(days=1)
+        bucket_format = "%Y-%m-%d"
+    else:
+        max_hours = 31 * 24  # ~1 month of hourly buckets
+        total_hours = int((end_dt - start_dt).total_seconds() // 3600)
+        if total_hours > max_hours:
+            raise HTTPException(400, f"Date range too large for hourly view (max {max_hours} hours).")
+        current_dt = start_dt
+        bucket_format = "%Y-%m-%d %H:00"
+        while current_dt < end_dt:
+            bucket_labels.append(current_dt.strftime(bucket_format))
+            current_dt += timedelta(hours=1)
+
+    bucket_col = func.strftime(bucket_format, WeighEvent.ts)
+    pass_sum = func.sum(case((WeighEvent.in_range.is_(True), 1), else_=0))
+    fail_sum = func.sum(case((WeighEvent.in_range.is_(False), 1), else_=0))
+
+    with Session() as s:
+        variant_meta = None
+        if variant_id is not None:
+            variant = s.get(Variant, int(variant_id))
+            if not variant:
+                raise HTTPException(404, "Variant not found")
+            variant_meta = {"id": variant.id, "name": variant.name}
+
+        q = s.query(
+            bucket_col.label("bucket"),
+            pass_sum.label("pass_count"),
+            fail_sum.label("fail_count"),
+        ).filter(WeighEvent.ts >= start_dt, WeighEvent.ts < end_dt)
+
+        if variant_id is not None:
+            q = q.filter(WeighEvent.variant_id == variant_id)
+
+        rows = q.group_by(bucket_col).order_by(bucket_col).all()
+
+    bucket_map = {row.bucket: row for row in rows}
+    data = []
+    total_pass = 0
+    total_fail = 0
+    for label in bucket_labels:
+        row = bucket_map.get(label)
+        p = int(row.pass_count) if row and row.pass_count is not None else 0
+        f = int(row.fail_count) if row and row.fail_count is not None else 0
+        data.append({"label": label, "pass": p, "fail": f})
+        total_pass += p
+        total_fail += f
+
+    return {
+        "interval": interval,
+        "start": start_date.isoformat(),
+        "end": end_date.isoformat(),
+        "bucket_count": len(bucket_labels),
+        "variant": variant_meta,
+        "buckets": data,
+        "totals": {
+            "pass": total_pass,
+            "fail": total_fail,
+            "total": total_pass + total_fail,
+        },
+    }
 # --- CSV export
 @app.get("/export.csv")
 def export_csv(frm: Optional[str] = None, to: Optional[str] = None, variant: Optional[int] = None):
@@ -304,7 +440,7 @@ def stats_summary(variant_id: int, bins: int = 20, frm: Optional[str] = None, to
         }
 # ---------- Distribution + Cp/Cpk ----------
 from math import sqrt, floor, ceil
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 def _parse_day(d: str) -> datetime:
     return datetime.strptime(d, "%Y-%m-%d")
 @app.get("/api/stats/distribution")
