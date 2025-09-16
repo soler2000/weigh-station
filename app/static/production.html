@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Production Output • Weigh Station</title>
+  <link rel="stylesheet" href="/static/styles.css?v=app-theme-1">
+  <style>
+    .filters { display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end; }
+    .filters .field { display:flex; flex-direction:column; gap:6px; min-width:150px; }
+    .filters .field label { font-size:0.72rem; letter-spacing:0.08em; text-transform:uppercase; color:var(--app-fg-muted); }
+    .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:14px; margin-bottom:18px; }
+    .metric { background:rgba(148,163,184,0.08); border-radius:14px; padding:14px 16px; display:flex; flex-direction:column; gap:6px; }
+    .metric .metric-label { font-size:0.8rem; text-transform:uppercase; letter-spacing:0.08em; color:var(--app-fg-muted); }
+    .metric .metric-value { font-weight:700; font-size:clamp(1.6rem,3vw,2.2rem); }
+    .chart-wrap { position:relative; width:100%; height:clamp(320px,60vh,540px); }
+    #outputChart { width:100%; height:100%; display:block; background:rgba(15,19,30,0.86); border:1px solid rgba(148,163,184,0.22); border-radius:18px; }
+    #emptyState { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; color:var(--app-fg-muted); font-size:1rem; padding:0 18px; pointer-events:none; background:transparent; }
+    .legend { margin-top:14px; display:flex; gap:16px; flex-wrap:wrap; color:var(--app-fg-muted); font-size:0.9rem; }
+    .legend span { display:inline-flex; align-items:center; gap:8px; }
+    .legend i { width:14px; height:14px; border-radius:4px; display:inline-block; }
+    #status { margin-top:14px; min-height:1.4em; color:var(--app-fg-muted); }
+    @media (max-width: 720px) {
+      .filters { flex-direction:column; align-items:stretch; }
+      .filters button { width:100%; }
+    }
+  </style>
+</head>
+<body class="app dark">
+  <header class="card topbar">
+    <div class="brand">Weigh Station</div>
+    <nav class="nav">
+      <a href="/">Home</a>
+      <a href="/settings">Settings</a>
+      <a href="/production" class="active">Production</a>
+      <a href="/stats">Stats</a>
+      <a href="/export">Export</a>
+    </nav>
+  </header>
+
+  <main class="page">
+    <section class="card">
+      <div class="row between" style="align-items:flex-start;">
+        <div>
+          <h1 style="margin-bottom:6px;">Production Output</h1>
+          <p class="muted" style="max-width:520px;">Review pass and fail counts for each product version across the selected date range. Toggle between hourly and daily buckets to zoom in on throughput.</p>
+        </div>
+        <div class="filters">
+          <div class="field">
+            <label for="variant">Version</label>
+            <select id="variant"></select>
+          </div>
+          <div class="field">
+            <label for="interval">Group By</label>
+            <select id="interval">
+              <option value="day">Day</option>
+              <option value="hour">Hour</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="start">From</label>
+            <input type="date" id="start">
+          </div>
+          <div class="field">
+            <label for="end">To</label>
+            <input type="date" id="end">
+          </div>
+          <button id="refresh" class="secondary">Refresh</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="metrics">
+        <div class="metric">
+          <div class="metric-label">Total</div>
+          <div id="totalCount" class="metric-value">0</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Passed</div>
+          <div id="passCount" class="metric-value">0</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Failed</div>
+          <div id="failCount" class="metric-value">0</div>
+        </div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="outputChart"></canvas>
+        <div id="emptyState" hidden>No production results for the selected filters.</div>
+      </div>
+      <div class="legend">
+        <span><i style="background:#22c55e;"></i>Passed</span>
+        <span><i style="background:#ef4444;"></i>Failed</span>
+      </div>
+      <div id="status"></div>
+    </section>
+  </main>
+
+  <script src="/static/production.js"></script>
+</body>
+</html>
