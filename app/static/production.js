@@ -1,24 +1,26 @@
-const variantSelect = document.getElementById('variant');
-const intervalSelect = document.getElementById('interval');
-const startInput = document.getElementById('start');
-const endInput = document.getElementById('end');
-const refreshBtn = document.getElementById('refresh');
-const passEl = document.getElementById('passCount');
-const failEl = document.getElementById('failCount');
-const totalEl = document.getElementById('totalCount');
-const statusEl = document.getElementById('status');
-const canvas = document.getElementById('outputChart');
-const emptyState = document.getElementById('emptyState');
-const ctx = canvas.getContext('2d');
+let variantSelect;
+let intervalSelect;
+let startInput;
+let endInput;
+let refreshBtn;
+let passEl;
+let failEl;
+let totalEl;
+let statusEl;
+let canvas;
+let emptyState;
+let ctx;
 
 let cachedChart = { labels: [], pass: [], fail: [], interval: 'day' };
 
 function setStatus(message, ok = true) {
+  if (!statusEl) return;
   statusEl.textContent = message || '';
   statusEl.style.color = ok ? 'var(--app-fg-muted)' : '#f87171';
 }
 
 function setLoading(loading) {
+  if (!refreshBtn) return;
   refreshBtn.disabled = loading;
   refreshBtn.textContent = loading ? 'Loading…' : 'Refresh';
 }
@@ -29,20 +31,32 @@ function formatNum(value) {
 }
 
 async function loadVariants() {
+  if (!variantSelect) return;
   const current = variantSelect.value || 'all';
   try {
     const res = await fetch('/api/variants', { cache: 'no-store' });
     if (!res.ok) throw new Error('Failed to load variants');
-    const variants = await res.json();
+    const payload = await res.json();
+    const variants = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.items)
+        ? payload.items
+        : [];
     const options = ['<option value="all">All Versions</option>'];
     for (const v of variants) {
-      options.push(`<option value="${v.id}">${v.name}</option>`);
+      const id = v?.id ?? v?.value;
+      const label = (v && (v.name || v.label || v.display)) ?? `Version ${id ?? ''}`;
+      if (id == null) continue;
+      options.push(`<option value="${id}">${label}</option>`);
     }
     variantSelect.innerHTML = options.join('');
-    if (variants.some(v => String(v.id) === current)) {
+    if (variants.some(v => String(v?.id ?? v?.value) === current)) {
       variantSelect.value = current;
     } else {
       variantSelect.value = 'all';
+    }
+    if (variants.length === 0) {
+      setStatus('Showing all versions (none configured yet).');
     }
   } catch (err) {
     console.error(err);
@@ -53,6 +67,7 @@ async function loadVariants() {
 }
 
 function setDefaultRange() {
+  if (!startInput || !endInput) return;
   const now = new Date();
   const end = now.toISOString().slice(0, 10);
   const startDate = new Date(now.getTime() - 6 * 86400000);
@@ -62,17 +77,19 @@ function setDefaultRange() {
 }
 
 function buildQuery() {
+  if (!intervalSelect) return '';
   const params = new URLSearchParams();
   params.set('interval', intervalSelect.value);
-  if (startInput.value) params.set('start', startInput.value);
-  if (endInput.value) params.set('end', endInput.value);
-  if (variantSelect.value && variantSelect.value !== 'all') {
+  if (startInput?.value) params.set('start', startInput.value);
+  if (endInput?.value) params.set('end', endInput.value);
+  if (variantSelect?.value && variantSelect.value !== 'all') {
     params.set('variant_id', variantSelect.value);
   }
   return params.toString();
 }
 
 function drawChart(labels, passData, failData, interval, cache = true) {
+  if (!canvas || !ctx) return;
   const width = canvas.clientWidth || 960;
   const height = canvas.clientHeight || 420;
   canvas.width = width;
@@ -189,6 +206,10 @@ function drawChart(labels, passData, failData, interval, cache = true) {
 }
 
 async function refresh() {
+  if (!variantSelect || !intervalSelect || !startInput || !endInput || !passEl || !failEl || !totalEl || !emptyState) {
+    console.error('Production Output page is missing required elements.');
+    return;
+  }
   if (startInput.value && endInput.value && startInput.value > endInput.value) {
     setStatus('From date must be on or before the To date.', false);
     return;
@@ -253,19 +274,47 @@ async function refresh() {
 }
 
 function handleResize() {
-  if (!cachedChart.labels.length) return;
+  if (!cachedChart.labels.length || !ctx) return;
   drawChart(cachedChart.labels, cachedChart.pass, cachedChart.fail, cachedChart.interval, false);
 }
 
-refreshBtn.addEventListener('click', () => refresh());
-variantSelect.addEventListener('change', () => refresh());
-intervalSelect.addEventListener('change', () => refresh());
-startInput.addEventListener('change', () => refresh());
-endInput.addEventListener('change', () => refresh());
-window.addEventListener('resize', handleResize);
+let initialized = false;
+async function init() {
+  if (initialized) return;
+  variantSelect = document.getElementById('variant');
+  intervalSelect = document.getElementById('interval');
+  startInput = document.getElementById('start');
+  endInput = document.getElementById('end');
+  refreshBtn = document.getElementById('refresh');
+  passEl = document.getElementById('passCount');
+  failEl = document.getElementById('failCount');
+  totalEl = document.getElementById('totalCount');
+  statusEl = document.getElementById('status');
+  canvas = document.getElementById('outputChart');
+  emptyState = document.getElementById('emptyState');
 
-(async function init() {
+  if (!variantSelect || !intervalSelect || !startInput || !endInput || !refreshBtn || !passEl || !failEl || !totalEl || !statusEl || !canvas || !emptyState) {
+    console.error('Production Output page markup is missing required elements.');
+    return;
+  }
+
+  ctx = canvas.getContext('2d');
+  initialized = true;
+
+  refreshBtn.addEventListener('click', refresh);
+  variantSelect.addEventListener('change', refresh);
+  intervalSelect.addEventListener('change', refresh);
+  startInput.addEventListener('change', refresh);
+  endInput.addEventListener('change', refresh);
+  window.addEventListener('resize', handleResize);
+
   setDefaultRange();
   await loadVariants();
   await refresh();
-})();
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => { init().catch(err => console.error(err)); });
+} else {
+  init().catch(err => console.error(err));
+}
