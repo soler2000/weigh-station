@@ -1,30 +1,187 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Weigh Station</title>
-  <link rel="stylesheet" href="/static/styles.css">
+  <title>Weigh Station – Home</title>
+  <!-- use the shared theme exactly like other pages -->
+  <link rel="stylesheet" href="/static/styles.css?v=home-sync-3">
+  <style>
+    /* Only minimal, page-local helpers (theme stays in styles.css) */
+    :root { --gap: 16px; }
+    .page { max-width: 1200px; margin: 0 auto; padding: var(--gap); }
+    .layout { display:grid; grid-template-columns: 2fr 1fr; gap: var(--gap); }
+    @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
+
+    .reading-card{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:40vh}
+    .reading{font-weight:800;font-size:clamp(56px,12vw,144px);line-height:1;letter-spacing:-.02em}
+    .reading-sub{opacity:.75;margin-top:6px}
+    .status--pass{ background: rgba(35,173,78,.08) }  /* soft green tint */
+    .status--fail{ background: rgba(214,57,57,.08) } /* soft red tint  */
+
+    .formgrid{display:grid;grid-template-columns:110px 1fr;gap:10px 14px;align-items:center}
+    .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+    .kpis{display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:12px;margin-top:12px}
+    .kpis .num{font-weight:700;font-size:clamp(20px,3.5vw,32px);text-align:center}
+    .footer-msg{min-height:1.4em;margin-top:8px}
+    .topbar{display:flex;align-items:center;justify-content:space-between;padding:10px var(--gap)}
+    .topbar .nav a{margin-left:12px;text-decoration:none}
+    .topbar .nav a.active{ text-decoration:underline }
+  </style>
 </head>
-<body>
-  <div id="stats">
-    <span>Passes: <b id="passCount">0</b></span>
-    <span>Fails: <b id="failCount">0</b></span>
-  </div>
-  <main id="panel" class="neutral">
-    <div id="weight" aria-live="polite">0.0</div>
-    <form id="form" autocomplete="off">
-      <label>
-        Variant:
-        <select id="variant"></select>
-      </label>
-      <input id="serial" placeholder="Scan/Type Serial" autocomplete="off" autofocus />
-      <button id="save">Save</button>
-    </form>
-    <a href="/export.csv" id="dl" download>Download CSV</a>
-    <a href="/settings" id="settings">⚙ Settings</a>
-    <a href="/stats" id="statsLink">📊 Stats</a>
+<body class="app dark">
+  <!-- same “chrome” as the other pages -->
+  <header class="card topbar">
+    <div class="brand" style="font-weight:700">Weigh Station</div>
+    <nav class="nav">
+      <a href="/" class="active">Home</a>
+      <a href="/settings">Settings</a>
+      <a href="/stats">Stats</a>
+      <a href="/export">Export</a>
+    </nav>
+  </header>
+
+  <main class="page">
+    <div class="layout">
+      <!-- Left: live reading -->
+      <section class="card reading-card" id="readingCard">
+        <div id="reading" class="reading">0.0 g</div>
+        <div id="readingSub" class="reading-sub">Waiting for scale…</div>
+      </section>
+
+      <!-- Right: controls -->
+      <section class="card" style="padding:14px">
+        <div class="formgrid">
+          <label for="variant">Variant</label>
+          <select id="variant"></select>
+
+          <label for="operator">Operator</label>
+          <input id="operator" type="text" placeholder="Operator (kept between saves)">
+
+          <label for="serial">Serial</label>
+          <input id="serial" type="text" placeholder="Scan/enter serial…">
+        </div>
+
+        <div class="actions">
+          <button id="saveBtn">Save</button>
+          <button id="tareBtn">Tare</button>
+          <button id="calBtn">Calibrate</button>
+          <button id="csvBtn">Download CSV</button>
+        </div>
+
+        <div class="kpis">
+          <div class="card" style="padding:10px"><div style="opacity:.7">Pass</div><div id="passCount" class="num">0</div></div>
+          <div class="card" style="padding:10px"><div style="opacity:.7">Fail</div><div id="failCount" class="num">0</div></div>
+          <div class="card" style="padding:10px"><div style="opacity:.7">Total</div><div id="totalCount" class="num">0</div></div>
+        </div>
+
+        <div id="msg" class="footer-msg"></div>
+      </section>
+    </div>
   </main>
-  <script src="/static/app.js?v=3"></script>
+
+<script>
+const $ = (id)=>document.getElementById(id);
+let currentVariant = null;
+
+function fmtG(x){ return (Math.round(x*10)/10).toFixed(1)+' g'; }
+function setMsg(t, ok=true){ const m=$('msg'); m.textContent=t||''; m.style.color = ok ? '' : '#b00'; }
+function tint(ok){
+  const c = $('readingCard'); c.classList.remove('status--pass','status--fail');
+  if(ok===true) c.classList.add('status--pass');
+  if(ok===false) c.classList.add('status--fail');
+}
+
+async function loadVariants(){
+  try{
+    const v = await fetch('/api/variants').then(r=>r.json());
+    const sel = $('variant'); sel.innerHTML='';
+    for(const it of v){
+      const o=document.createElement('option');
+      o.value=it.id; o.textContent=`${it.name || ('Variant '+it.id)} [${it.min_g}..${it.max_g} g]`;
+      sel.appendChild(o);
+    }
+    if(v.length){ sel.value=v[0].id; currentVariant=v[0]; refreshStats(); }
+    sel.addEventListener('change', ()=>{
+      const id=parseInt(sel.value,10);
+      currentVariant = v.find(x=>x.id===id) || null;
+      refreshStats();
+    });
+  }catch{ setMsg('Failed to load variants', false); }
+}
+
+function updateScreen(d){
+  $('reading').textContent = fmtG(d.g);
+  $('readingSub').textContent = `RAW ${d.raw ?? '–'} • ${new Date().toLocaleTimeString()}`;
+  if(currentVariant){
+    const ok = (d.g >= currentVariant.min_g && d.g <= currentVariant.max_g);
+    tint(ok);
+  }
+}
+
+// WebSocket + polling fallback
+(function connectWS(){
+  const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws/weight`);
+  ws.onmessage = ev => { try { updateScreen(JSON.parse(ev.data)); } catch{} };
+  ws.onclose   = () => setTimeout(connectWS, 1200);
+})();
+setInterval(async ()=>{
+  try{
+    const d = await fetch('/api/debug/latest').then(r=>r.json());
+    if(d && typeof d.g==='number') updateScreen(d);
+  }catch{}
+}, 1500);
+
+async function refreshStats(){
+  try{
+    const q = currentVariant ? `?variant_id=${currentVariant.id}` : '';
+    const s = await fetch('/api/stats'+q).then(r=>r.json());
+    $('passCount').textContent  = s.pass ?? 0;
+    $('failCount').textContent  = s.fail ?? 0;
+    $('totalCount').textContent = s.total ?? 0;
+  }catch{}
+}
+
+async function doTare(){ try{ await fetch('/api/tare',{method:'POST'}); setMsg('Tare applied'); } catch{ setMsg('Tare failed', false);} }
+async function doCal(){
+  try{
+    const v = prompt('Place known weight, enter grams (e.g. 200.0):'); if(!v) return;
+    const g = parseFloat(v); if(!isFinite(g) || g <= 0){ setMsg('Invalid reference weight', false); return; }
+    const r = await fetch(`/api/calibrate?ref_g=${encodeURIComponent(g)}`, {method:'POST'});
+    if(!r.ok) throw new Error(); setMsg('Calibration saved');
+  }catch{ setMsg('Calibration failed', false); }
+}
+function exportCsv(){
+  if(!currentVariant){ setMsg('Choose variant', false); return; }
+  const a=document.createElement('a');
+  a.href=`/export.csv?variant=${encodeURIComponent(currentVariant.id)}`;
+  a.download=''; document.body.appendChild(a); a.click(); a.remove();
+}
+async function doSave(){
+  try{
+    if(!currentVariant){ setMsg('Choose variant first', false); return; }
+    const serial = ($('serial').value || '').trim();
+    if(!serial){ setMsg('Serial cannot be blank', false); $('serial').focus(); return; }
+    let url = `/api/weigh/commit?variant_id=${encodeURIComponent(currentVariant.id)}&serial=${encodeURIComponent(serial)}`;
+    const op  = encodeURIComponent(($('operator')?.value || '').trim());
+    if(op) url += '&operator='+op;
+    const res = await fetch(url, {method:'POST'});
+    if(res.status===409){ setMsg('Serial already used', false); return; }
+    if(!res.ok){ setMsg('Save failed', false); return; }
+    setMsg('Saved'); $('serial').value=''; refreshStats();
+  }catch{ setMsg('Save error', false); }
+}
+
+window.addEventListener('load', ()=>{
+  loadVariants();
+  setInterval(refreshStats, 3000);
+  $('saveBtn').addEventListener('click', doSave);
+  $('tareBtn').addEventListener('click', doTare);
+  $('calBtn'). addEventListener('click', doCal);
+  $('csvBtn'). addEventListener('click', exportCsv);
+  $('serial').focus();
+});
+</script>
 </body>
 </html>
