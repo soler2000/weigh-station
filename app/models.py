@@ -30,6 +30,7 @@ class WeighEvent(Base):
     ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"))
     serial: Mapped[str] = mapped_column(String(64))
+    operator: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     gross_g: Mapped[float] = mapped_column(Float)
     net_g: Mapped[float] = mapped_column(Float)
     in_range: Mapped[bool] = mapped_column(Boolean)

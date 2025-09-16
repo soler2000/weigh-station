@@ -39,6 +39,7 @@ class WeighEventOut(BaseModel):
     ts: str
     variant_id: int
     serial: str
+    operator: Optional[str] = None
     gross_g: float
     net_g: float
     in_range: bool
@@ -130,10 +131,11 @@ async def ws_weight(ws: WebSocket):
         await ws.close()
 # --- Commit a weighing (now enforces non-blank + unique serial)
 @app.post("/api/weigh/commit", response_model=WeighEventOut)
-def commit(variant_id: int, serial: str = Query(...)):
+def commit(variant_id: int, serial: str = Query(...), operator: Optional[str] = Query(default=None)):
     serial = (serial or "").strip()
     if not serial:
         raise HTTPException(400, "Serial cannot be blank.")
+    operator_clean = (operator or "").strip() or None
     with Session() as s:
         # Enforce global uniqueness of serial across all variants
         dup = s.query(WeighEvent).filter(WeighEvent.serial == serial).first()
@@ -143,14 +145,29 @@ def commit(variant_id: int, serial: str = Query(...)):
         if not v:
             raise HTTPException(404, "Variant not found")
         latest = reader.read_latest()
-        g = float(latest["g"])
+        g = float(latest.get("g", 0.0))
         in_range = (v.min_g <= g <= v.max_g)
-        evt = WeighEvent(variant_id=variant_id, serial=serial,
-                         gross_g=g, net_g=DRIFT_FILTER.update(g, in_range=in_range, raw_avg=int(latest["raw"])))
+        net_g = float(DRIFT_FILTER.update(g))
+        raw_avg = int(latest.get("raw", 0))
+        evt = WeighEvent(
+            variant_id=variant_id,
+            serial=serial,
+            operator=operator_clean,
+            gross_g=g,
+            net_g=net_g,
+            in_range=in_range,
+            raw_avg=raw_avg,
+        )
         s.add(evt); s.commit(); s.refresh(evt)
         return WeighEventOut(
-            id=evt.id, ts=evt.ts.isoformat(), variant_id=evt.variant_id,
-            serial=evt.serial, gross_g=evt.gross_g, net_g=evt.net_g, in_range=evt.in_range
+            id=evt.id,
+            ts=evt.ts.isoformat(),
+            variant_id=evt.variant_id,
+            serial=evt.serial,
+            operator=evt.operator,
+            gross_g=evt.gross_g,
+            net_g=evt.net_g,
+            in_range=evt.in_range,
         )
 # --- Stats (pass/fail counters, optional by variant)
 @app.get("/api/stats")
@@ -173,12 +190,21 @@ def export_csv(frm: Optional[str] = None, to: Optional[str] = None, variant: Opt
     # Minimal filtering; extend as needed
     output = io.StringIO()
     w = csv.writer(output)
-    w.writerow(["ts", "variant_id", "serial", "gross_g", "net_g", "in_range"])
+    w.writerow(["ts", "variant_id", "serial", "operator", "gross_g", "net_g", "in_range", "raw_avg"])
     with Session() as s:
         q = s.query(WeighEvent)
         if variant: q = q.filter(WeighEvent.variant_id == variant)
         for r in q.order_by(WeighEvent.ts.asc()).all():
-            w.writerow([r.ts.isoformat(), r.variant_id, r.serial, r.gross_g, r.net_g, r.in_range])
+            w.writerow([
+                r.ts.isoformat(),
+                r.variant_id,
+                r.serial,
+                r.operator or "",
+                r.gross_g,
+                r.net_g,
+                r.in_range,
+                r.raw_avg,
+            ])
     output.seek(0)
     return StreamingResponse(output, media_type="text/csv",
                              headers={"Content-Disposition": "attachment; filename=weigh_export.csv"})
