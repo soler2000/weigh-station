@@ -1,68 +1,75 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Settings • Weigh Station</title>
-  <link rel="stylesheet" href="/static/styles.css">
-  <style>
-    body { background:#111; color:#fff; }
-    .wrap { max-width: 900px; margin: 2rem auto; padding: 1rem; }
-    h1, h2 { margin: .5rem 0; }
-    .card { background: #222; padding: 1rem; border-radius: .5rem; margin-bottom: 1rem; }
-    input, button, select { font-size: 1rem; padding:.4rem .6rem; border-radius:.3rem; border:none; }
-    table { width:100%; border-collapse: collapse; }
-    th, td { padding: .4rem .5rem; border-bottom: 1px solid #333; }
-    .row { display:flex; gap:.5rem; flex-wrap: wrap; align-items: center; }
-    .muted { color:#aaa; }
-    a.home { color:#fff; text-decoration:none; background:#444; padding:.3rem .6rem; border-radius:.3rem; }
-  </style>
+  <link rel="stylesheet" href="/static/styles.css?v=app-theme-1">
 </head>
-<body>
-  <div class="wrap">
-    <div class="row">
-      <h1 style="flex:1">Settings</h1>
-      <a class="home" href="/">⬅ Back to Weigh</a>
-    </div>
+<body class="app dark">
+  <header class="card topbar">
+    <div class="brand">Weigh Station</div>
+    <nav class="nav">
+      <a href="/">Home</a>
+      <a href="/settings" class="active">Settings</a>
+      <a href="/stats">Stats</a>
+      <a href="/export">Export</a>
+    </nav>
+  </header>
 
-    <div class="card">
-      <h2>Calibration</h2>
-      <div class="row">
-        <button id="btn-tare">Tare (no load)</button>
-        <input id="known" type="number" step="0.01" placeholder="Known mass (g)" />
-        <button id="btn-known">Calibrate with Known</button>
-        <span id="calib-msg" class="muted"></span>
-      </div>
-      <p class="muted">Make sure the platform is empty for Tare. Then place a known weight (e.g., 100.0 g) and calibrate.</p>
-    </div>
+  <main class="page">
+    <div class="stack">
+      <section class="card">
+        <div class="row between">
+          <div>
+            <h1 style="margin-bottom: 4px;">Settings</h1>
+            <p class="muted" style="margin: 0;">Manage calibration, variants, and maintenance tasks.</p>
+          </div>
+          <a class="btn secondary" href="/">⬅ Back to Weigh</a>
+        </div>
+      </section>
 
-    <div class="card">
-      <h2>Product Variants</h2>
-      <table id="variants">
-        <thead><tr><th>ID</th><th>Name</th><th>Min (g)</th><th>Max (g)</th><th></th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="row">
-        <input id="v-name" placeholder="Name">
-        <input id="v-min" type="number" step="0.1" placeholder="Min g">
-        <input id="v-max" type="number" step="0.1" placeholder="Max g">
-        <button id="v-add">Add</button>
-        <span class="muted">Tip: You can edit existing rows inline and click Save.</span>
-      </div>
-    </div>
+      <section class="card">
+        <h2>Calibration</h2>
+        <div class="row">
+          <button id="btn-tare">Tare (no load)</button>
+          <input id="known" type="number" step="0.01" placeholder="Known mass (g)">
+          <button id="btn-known" class="secondary">Calibrate with Known</button>
+          <span id="calib-msg" class="muted"></span>
+        </div>
+        <p class="muted">Make sure the platform is empty for Tare. Then place a known weight (e.g., 100.0 g) and calibrate.</p>
+      </section>
 
-    <div class="card">
-      <h2>Data Management</h2>
-      <p class="muted">Danger zone — these actions cannot be undone.</p>
-      <div class="row">
-        <button id="btn-del-events" style="background:#702; color:#fff;">Delete ALL weigh logs</button>
-        <button id="btn-factory-reset" style="background:#900; color:#fff;">Factory reset (logs + variants + calibration)</button>
-      </div>
-      <p class="muted">You will be asked to confirm by typing <code>DELETE</code> or <code>RESET</code>.</p>
-    </div>
+      <section class="card">
+        <h2>Product Variants</h2>
+        <table id="variants">
+          <thead>
+            <tr><th>ID</th><th>Name</th><th>Min (g)</th><th>Max (g)</th><th></th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div class="row">
+          <input id="v-name" placeholder="Name">
+          <input id="v-min" type="number" step="0.1" placeholder="Min g">
+          <input id="v-max" type="number" step="0.1" placeholder="Max g">
+          <button id="v-add">Add</button>
+          <span class="muted">Tip: You can edit existing rows inline and click Save.</span>
+        </div>
+      </section>
 
-    <p class="muted">Pins can be overridden via env: <code>DATA_PIN</code> and <code>CLOCK_PIN</code>. Auto-tare is enabled by default.</p>
-  </div>
+      <section class="card">
+        <h2>Data Management</h2>
+        <p class="muted">Danger zone — these actions cannot be undone.</p>
+        <div class="row tight">
+          <button id="btn-del-events" class="danger secondary">Delete ALL weigh logs</button>
+          <button id="btn-factory-reset" class="danger secondary">Factory reset (logs + variants + calibration)</button>
+        </div>
+        <p class="muted">You will be asked to confirm by typing <code>DELETE</code> or <code>RESET</code>.</p>
+      </section>
+
+      <p class="muted">Pins can be overridden via env: <code>DATA_PIN</code> and <code>CLOCK_PIN</code>. Auto-tare is enabled by default.</p>
+    </div>
+  </main>
 
   <script src="/static/settings.js"></script>
 </body>
