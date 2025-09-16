@@ -1,6 +1,7 @@
 import asyncio, csv, io, os
 from typing import List, Optional
 from pathlib import Path
+from datetime import datetime, timedelta, time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Path as FPath
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -176,17 +177,25 @@ def commit(variant_id: int, serial: str = Query(...), operator: Optional[str] = 
 # --- Stats (pass/fail counters, optional by variant)
 @app.get("/api/stats")
 def stats(variant_id: Optional[int] = None):
-    try:
-        # apply runtime tare for saved values
-        net_g = (net_g)
-    except Exception:
-        pass
+    today = datetime.utcnow().date()
+    start_dt = datetime.combine(today, time.min)
+    end_dt = start_dt + timedelta(days=1)
+    pass_case = func.sum(case((WeighEvent.in_range.is_(True), 1), else_=0))
+    fail_case = func.sum(case((WeighEvent.in_range.is_(False), 1), else_=0))
     with Session() as s:
-        q = s.query(WeighEvent)
+        filters = [WeighEvent.ts >= start_dt, WeighEvent.ts < end_dt]
         if variant_id:
-            q = q.filter(WeighEvent.variant_id == variant_id)
-        pass_count = q.filter(WeighEvent.in_range.is_(True)).count()
-        fail_count = q.filter(WeighEvent.in_range.is_(False)).count()
+            filters.append(WeighEvent.variant_id == variant_id)
+        row = (
+            s.query(
+                pass_case.label("pass_count"),
+                fail_case.label("fail_count"),
+            )
+            .filter(*filters)
+            .one()
+        )
+        pass_count = int(row.pass_count or 0)
+        fail_count = int(row.fail_count or 0)
         return {"pass": pass_count, "fail": fail_count, "total": pass_count + fail_count}
 
 @app.get("/api/production/output")
@@ -411,7 +420,6 @@ def stats_summary(variant_id: int, bins: int = 20, frm: Optional[str] = None, to
         }
 # ---------- Distribution + Cp/Cpk ----------
 from math import sqrt, floor, ceil
-from datetime import datetime, timedelta, time
 def _parse_day(d: str) -> datetime:
     return datetime.strptime(d, "%Y-%m-%d")
 @app.get("/api/stats/distribution")
