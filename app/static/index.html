@@ -35,7 +35,7 @@
       <a href="/settings">Settings</a>
       <a href="/production">Production</a>
       <a href="/stats">Stats</a>
-      <a id="exportLink" href="/export.csv">Export</a>
+      <a href="/export">Export</a>
     </nav>
   </header>
 
@@ -140,12 +140,6 @@ async function refreshStats(){
   }catch{}
 }
 
-function exportCsv(){
-  if(!currentVariant){ setMsg('Choose variant', false); return; }
-  const a=document.createElement('a');
-  a.href=`/export.csv?variant=${encodeURIComponent(currentVariant.id)}`;
-  a.download=''; document.body.appendChild(a); a.click(); a.remove();
-}
 async function doSave(){
   try{
     if(!currentVariant){ setMsg('Choose variant first', false); return; }
@@ -165,13 +159,6 @@ window.addEventListener('load', ()=>{
   loadVariants();
   setInterval(refreshStats, 3000);
   $('saveBtn').addEventListener('click', doSave);
-  const exportLink = $('exportLink');
-  if(exportLink){
-    exportLink.addEventListener('click', ev => {
-      ev.preventDefault();
-      exportCsv();
-    });
-  }
   $('serial').focus();
 });
 </script>
