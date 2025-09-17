@@ -218,6 +218,11 @@ async function loadVariants() {
   }
 }
 
+function toNumber(val) {
+  const num = Number(val);
+  return Number.isFinite(num) ? num : null;
+}
+
 function drawHistogram(data) {
   const edges = (data?.bins?.edges ?? []).map(Number);
   const counts = (data?.bins?.counts ?? []).map(Number);
@@ -267,23 +272,49 @@ function drawHistogram(data) {
     histCtx.fillText(String(value), x0 - 8, y + 4);
   }
 
+  const dataDomainMin = Number(edges[0]);
+  const dataDomainMax = Number(edges[edges.length - 1]);
+  const overlayVals = [
+    toNumber(data?.lsl),
+    toNumber(data?.usl),
+    toNumber(data?.control?.lcl),
+    toNumber(data?.control?.ucl),
+  ].filter(v => v !== null);
+  let domainMin = dataDomainMin;
+  let domainMax = dataDomainMax;
+  if (overlayVals.length) {
+    domainMin = Math.min(domainMin, ...overlayVals);
+    domainMax = Math.max(domainMax, ...overlayVals);
+  }
+  if (!Number.isFinite(domainMin) || !Number.isFinite(domainMax) || domainMin === domainMax) {
+    domainMin = dataDomainMin;
+    domainMax = dataDomainMax;
+  }
+  if (domainMin === domainMax) {
+    domainMin -= 0.5;
+    domainMax += 0.5;
+  }
+  const pad = Math.max(0.001, (domainMax - domainMin) * 0.04);
+  domainMin -= pad;
+  domainMax += pad;
+  const mean = Number(data?.mean);
+  const stdev = Number(data?.stdev);
+  const xOf = (val) => x0 + ((val - domainMin) / (domainMax - domainMin)) * plotW;
+
   const bins = counts.length;
-  const binWidth = plotW / bins;
   histCtx.globalAlpha = 0.55;
   histCtx.fillStyle = '#60a5fa';
   for (let i = 0; i < bins; i++) {
     const h = (counts[i] / maxCount) * plotH;
-    const bx = x0 + i * binWidth + 1;
-    const bw = Math.max(1, binWidth - 2);
-    histCtx.fillRect(bx, y0 - h, bw, h);
+    const edgeStart = Number(edges[i]);
+    const edgeEnd = Number(edges[i + 1]);
+    const px0 = xOf(edgeStart);
+    const px1 = xOf(edgeEnd);
+    const leftPx = Math.min(px0, px1);
+    const widthPx = Math.max(1, Math.abs(px1 - px0) - 2);
+    histCtx.fillRect(leftPx + 1, y0 - h, widthPx, h);
   }
   histCtx.globalAlpha = 1;
-
-  const domainMin = Number(edges[0]);
-  const domainMax = Number(edges[edges.length - 1]);
-  const mean = Number(data?.mean);
-  const stdev = Number(data?.stdev);
-  const xOf = (val) => x0 + ((val - domainMin) / (domainMax - domainMin)) * plotW;
 
   const drawV = (val, color, dash, label) => {
     if (val === null || val === undefined) return;
@@ -326,11 +357,13 @@ function drawHistogram(data) {
       ? Number(data.count)
       : counts.reduce((sum, c) => sum + c, 0);
     const stepCount = Math.min(600, Math.max(120, bins * 24));
+    const dataSpan = dataDomainMax - dataDomainMin;
+    const sampleBinWidth = dataSpan > 0 ? dataSpan / bins : (domainMax - domainMin) / bins;
     histCtx.beginPath();
     for (let i = 0; i <= stepCount; i++) {
       const frac = i / stepCount;
-      const xVal = domainMin + frac * (domainMax - domainMin);
-      const expected = total * ((domainMax - domainMin) / bins) * normalPdf(xVal, mean, stdev);
+      const xVal = dataDomainMin + frac * (dataDomainMax - dataDomainMin);
+      const expected = total * sampleBinWidth * normalPdf(xVal, mean, stdev);
       const y = y0 - (expected / maxCount) * plotH;
       const x = xOf(xVal);
       if (i === 0) histCtx.moveTo(x, y);
@@ -367,7 +400,9 @@ function drawControlChart(controlData) {
   const plotW = x1 - x0;
   const plotH = y0 - y1;
 
-  const values = series.map(pt => Number(pt.value)).filter(v => Number.isFinite(v));
+  const values = series
+    .map(pt => Number(pt.value))
+    .filter(v => Number.isFinite(v));
   if (!values.length) {
     controlCtx.fillStyle = '#a3aab7';
     controlCtx.font = '14px system-ui';
@@ -449,19 +484,32 @@ function drawControlChart(controlData) {
   controlCtx.strokeStyle = '#93c5fd';
   controlCtx.lineWidth = 2;
   controlCtx.beginPath();
+  let hasStroke = false;
   series.forEach((pt, idx) => {
     const value = Number(pt.value);
+    if (!Number.isFinite(value)) {
+      hasStroke = false;
+      return;
+    }
     const x = xOfIdx(idx);
     const y = yOf(value);
-    if (idx === 0) controlCtx.moveTo(x, y);
-    else controlCtx.lineTo(x, y);
+    if (!hasStroke) {
+      controlCtx.moveTo(x, y);
+      hasStroke = true;
+    } else {
+      controlCtx.lineTo(x, y);
+    }
   });
-  controlCtx.stroke();
+  if (hasStroke) {
+    controlCtx.stroke();
+  }
 
   controlCtx.fillStyle = '#2563eb';
   series.forEach((pt, idx) => {
+    const value = Number(pt.value);
+    if (!Number.isFinite(value)) return;
     const x = xOfIdx(idx);
-    const y = yOf(Number(pt.value));
+    const y = yOf(value);
     controlCtx.beginPath();
     controlCtx.arc(x, y, 3, 0, Math.PI * 2);
     controlCtx.fill();

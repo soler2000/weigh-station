@@ -541,8 +541,18 @@ def stats_distribution(
             lcl = mean
         def rd(x, d=4):
             return None if x is None else (round(x, d))
+        def _control_value(row: WeighEvent) -> float | None:
+            if row.net_g is not None:
+                return rd(float(row.net_g), 4)
+            if row.gross_g is not None:
+                return rd(float(row.gross_g), 4)
+            return None
+
         control_series = [
-            {"ts": r.ts.isoformat(), "value": rd(float(r.net_g), 4)}
+            {
+                "ts": r.ts.isoformat(),
+                "value": _control_value(r),
+            }
             for r in rows
         ]
         return {
