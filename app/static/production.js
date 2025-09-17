@@ -30,6 +30,20 @@ function setLoading(loading) {
   refreshBtn.textContent = loading ? 'Loading…' : 'Refresh';
 }
 
+function showEmptyState(message = '') {
+  if (!emptyState) return;
+  emptyState.hidden = false;
+  emptyState.style.display = 'flex';
+  emptyState.textContent = message;
+}
+
+function hideEmptyState() {
+  if (!emptyState) return;
+  emptyState.hidden = true;
+  emptyState.style.display = 'none';
+  emptyState.textContent = '';
+}
+
 function formatNum(value) {
   const num = Number(value) || 0;
   return num.toLocaleString();
@@ -438,9 +452,10 @@ async function refresh(options = {}) {
     failEl.textContent = formatNum(failTotal);
     totalEl.textContent = formatNum(total);
 
-    emptyState.hidden = hasValues;
-    if (!hasValues) {
-      emptyState.textContent = 'No production results for the selected filters.';
+    if (hasValues) {
+      hideEmptyState();
+    } else {
+      showEmptyState('No production results for the selected filters.');
     }
 
     let variantName = payload.variant?.name;
@@ -461,8 +476,7 @@ async function refresh(options = {}) {
     console.error(err);
     drawChart([], [], [], intervalSelect.value);
     cachedChart = { labels: [], pass: [], fail: [], interval: intervalSelect.value };
-    emptyState.hidden = false;
-    emptyState.textContent = err.message || 'No production results for the selected filters.';
+    showEmptyState(err.message || 'No production results for the selected filters.');
     passEl.textContent = '0';
     failEl.textContent = '0';
     totalEl.textContent = '0';
