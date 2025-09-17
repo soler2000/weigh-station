@@ -1,4 +1,6 @@
 import asyncio, csv, io, os, json
+from html import escape
+from datetime import datetime, timedelta, time
 from typing import List, Optional
 from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Path as FPath
@@ -25,6 +27,54 @@ Base.metadata.create_all(engine)
 
 app = FastAPI(title="Weigh Station")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+def _format_range_value(value: Optional[float]) -> str:
+    if value is None:
+        return ""
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if num != num or num in (float("inf"), float("-inf")):
+        return str(value)
+    if num.is_integer():
+        return str(int(num))
+    return (f"{num:.3f}".rstrip("0").rstrip("."))
+
+
+def _serialize_variant(row: Variant) -> dict:
+    base_name = row.name or f"Variant {row.id}"
+    min_text = _format_range_value(row.min_g)
+    max_text = _format_range_value(row.max_g)
+    unit = row.unit or "g"
+    if min_text and max_text:
+        label = f"{base_name} [{min_text}-{max_text} {unit}]"
+    else:
+        label = base_name
+    return {
+        "id": row.id,
+        "name": base_name,
+        "min_g": row.min_g,
+        "max_g": row.max_g,
+        "unit": unit,
+        "enabled": bool(row.enabled),
+        "label": label,
+    }
+
+
+def _build_available_range(start_dt, end_dt):
+    if not start_dt or not end_dt:
+        return None
+    if hasattr(start_dt, "date"):
+        start_str = start_dt.date().isoformat()
+    else:
+        start_str = str(start_dt)
+    if hasattr(end_dt, "date"):
+        end_str = end_dt.date().isoformat()
+    else:
+        end_str = str(end_dt)
+    return {"start": start_str, "end": end_str}
 # --- Pydantic DTOs
 class VariantIn(BaseModel):
     name: str = Field(..., max_length=64)
@@ -79,19 +129,25 @@ def production_output_page():
             .order_by(Variant.id.asc())
             .all()
         )
-        payload = [
-            dict(
-                id=v.id,
-                name=v.name,
-                min_g=v.min_g,
-                max_g=v.max_g,
-                unit=v.unit,
-                enabled=v.enabled,
-            )
-            for v in variants
-        ]
+        variant_payload = [_serialize_variant(v) for v in variants]
+        earliest, latest = (
+            s.query(func.min(WeighEvent.ts), func.max(WeighEvent.ts))
+            .first()
+        )
 
-    bootstrap_json = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
+    available_range = _build_available_range(earliest, latest)
+
+    if variant_payload:
+        option_markup = "".join(
+            f"\n              <option value=\"{v['id']}\">{escape(v['label'])}</option>"
+            for v in variant_payload
+        )
+        placeholder = '<option value="all">All Versions</option>'
+        if placeholder in html:
+            html = html.replace(placeholder, placeholder + option_markup, 1)
+
+    bootstrap_data = {"variants": variant_payload, "availableRange": available_range}
+    bootstrap_json = json.dumps(bootstrap_data, ensure_ascii=False).replace("</", "<\\/")
     injection = (
         '<script id="production-variant-data" type="application/json">'
         + bootstrap_json
@@ -277,12 +333,26 @@ def production_output(
     fail_sum = func.sum(case((WeighEvent.in_range.is_(False), 1), else_=0))
 
     with Session() as s:
+        variant_rows = (
+            s.query(Variant)
+            .order_by(Variant.id.asc())
+            .all()
+        )
+        variant_payload = [_serialize_variant(v) for v in variant_rows]
+        variant_lookup = {item["id"]: item for item in variant_payload}
+
         variant_meta = None
         if variant_id is not None:
-            variant = s.get(Variant, int(variant_id))
-            if not variant:
+            selected = variant_lookup.get(int(variant_id))
+            if not selected:
                 raise HTTPException(404, "Variant not found")
-            variant_meta = {"id": variant.id, "name": variant.name}
+            variant_meta = {"id": selected["id"], "name": selected["name"]}
+
+        range_query = s.query(func.min(WeighEvent.ts), func.max(WeighEvent.ts))
+        if variant_id is not None:
+            range_query = range_query.filter(WeighEvent.variant_id == variant_id)
+        earliest_ts, latest_ts = range_query.first()
+        available_range = _build_available_range(earliest_ts, latest_ts)
 
         q = s.query(
             bucket_col.label("bucket"),
@@ -314,6 +384,8 @@ def production_output(
         "bucket_count": len(bucket_labels),
         "variant": variant_meta,
         "buckets": data,
+        "available_range": available_range,
+        "variants": variant_payload,
         "totals": {
             "pass": total_pass,
             "fail": total_fail,
@@ -440,7 +512,6 @@ def stats_summary(variant_id: int, bins: int = 20, frm: Optional[str] = None, to
         }
 # ---------- Distribution + Cp/Cpk ----------
 from math import sqrt, floor, ceil
-from datetime import datetime, timedelta, time
 def _parse_day(d: str) -> datetime:
     return datetime.strptime(d, "%Y-%m-%d")
 @app.get("/api/stats/distribution")

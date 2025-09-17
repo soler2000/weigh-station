@@ -13,6 +13,10 @@ let ctx;
 
 let cachedChart = { labels: [], pass: [], fail: [], interval: 'day' };
 let lastVariants = [];
+let bootstrapData = null;
+
+const DAY_MS = 86400000;
+const DEFAULT_DAY_WINDOW = 30;
 
 function setStatus(message, ok = true) {
   if (!statusEl) return;
@@ -29,6 +33,23 @@ function setLoading(loading) {
 function formatNum(value) {
   const num = Number(value) || 0;
   return num.toLocaleString();
+}
+
+function formatDateInput(value) {
+  if (!value) return '';
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(date.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function parseDateInput(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
 }
 
 function formatVariantRangeValue(value) {
@@ -54,18 +75,20 @@ function normalizeVariantEntry(entry) {
     entry.id ?? entry.value ?? entry.variant_id ?? entry.variantId ?? entry.uuid ?? entry.key;
   if (idCandidate == null) return null;
   const id = String(idCandidate);
-  const name =
-    entry.name ?? entry.label ?? entry.display ?? entry.title ?? entry.variant ?? `Version ${id}`;
+  const nameCandidate =
+    entry.name ?? entry.display ?? entry.title ?? entry.variant ?? entry.label ?? `Version ${id}`;
+  const name = String(nameCandidate);
   const min = entry.min_g ?? entry.min ?? entry.lsl ?? entry.lower ?? entry.start ?? null;
   const max = entry.max_g ?? entry.max ?? entry.usl ?? entry.upper ?? entry.end ?? null;
   const unit = entry.unit ?? entry.units ?? entry.measure ?? 'g';
-  let label = String(name);
-  if (min != null && max != null) {
+  const providedLabel = entry.label != null ? String(entry.label) : null;
+  let label = providedLabel ?? name;
+  if (providedLabel == null && min != null && max != null) {
     const minLabel = formatVariantRangeValue(min);
     const maxLabel = formatVariantRangeValue(max);
     label += ` [${minLabel}-${maxLabel} ${unit}]`;
   }
-  return { id, label, name: String(name) };
+  return { id, label, name };
 }
 
 function applyVariantOptions(payload, currentValue = 'all') {
@@ -98,18 +121,31 @@ function applyVariantOptions(payload, currentValue = 'all') {
 }
 
 function bootstrapVariants() {
-  if (!variantSelect) return;
+  if (!variantSelect) return null;
   const node = document.getElementById('production-variant-data');
-  if (!node) return;
+  if (!node) return null;
   try {
-    const text = node.textContent || node.innerText || '[]';
-    const payload = JSON.parse(text || '[]');
-    const count = applyVariantOptions(payload, variantSelect.value || 'all');
+    const text = node.textContent || node.innerText || 'null';
+    const parsed = JSON.parse(text || 'null');
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      bootstrapData = parsed;
+    } else if (Array.isArray(parsed)) {
+      bootstrapData = { variants: parsed };
+    } else {
+      bootstrapData = null;
+    }
+    const count = applyVariantOptions(parsed, variantSelect.value || 'all');
+    if (bootstrapData) {
+      bootstrapData.variants = lastVariants.slice();
+    }
     if (count === 0) {
       setStatus('Showing all versions (none configured yet).');
     }
+    return bootstrapData;
   } catch (err) {
     console.error('Failed to parse initial variants', err);
+    bootstrapData = null;
+    return null;
   } finally {
     if (node.parentNode) {
       node.parentNode.removeChild(node);
@@ -125,6 +161,8 @@ async function loadVariants() {
     if (!res.ok) throw new Error('Failed to load variants');
     const payload = await res.json();
     const count = applyVariantOptions(payload, current);
+    if (!bootstrapData) bootstrapData = {};
+    bootstrapData.variants = lastVariants.slice();
     if (count === 0) {
       setStatus('Showing all versions (none configured yet).');
     }
@@ -137,14 +175,68 @@ async function loadVariants() {
   }
 }
 
-function setDefaultRange() {
+function updateRangeBounds(range) {
   if (!startInput || !endInput) return;
+  if (!range) {
+    startInput.removeAttribute('min');
+    startInput.removeAttribute('max');
+    endInput.removeAttribute('min');
+    endInput.removeAttribute('max');
+    return;
+  }
+  if (range.start) {
+    startInput.min = range.start;
+    endInput.min = range.start;
+  }
+  if (range.end) {
+    startInput.max = range.end;
+    endInput.max = range.end;
+  }
+}
+
+function setDefaultRange(range) {
+  if (!startInput || !endInput) return;
+  if (range && range.start && range.end) {
+    updateRangeBounds(range);
+    const startDate = parseDateInput(range.start);
+    const endDate = parseDateInput(range.end);
+    if (startDate && endDate) {
+      const defaultEnd = endDate;
+      let defaultStart;
+      if (DEFAULT_DAY_WINDOW <= 1) {
+        defaultStart = defaultEnd;
+      } else {
+        defaultStart = new Date(defaultEnd.getTime() - (DEFAULT_DAY_WINDOW - 1) * DAY_MS);
+      }
+      const minStart = startDate;
+      if (defaultStart < minStart) {
+        defaultStart = minStart;
+      }
+      startInput.value = formatDateInput(defaultStart);
+      endInput.value = formatDateInput(defaultEnd);
+      return;
+    }
+  }
+  updateRangeBounds(null);
   const now = new Date();
-  const end = now.toISOString().slice(0, 10);
-  const startDate = new Date(now.getTime() - 6 * 86400000);
-  const start = startDate.toISOString().slice(0, 10);
-  startInput.value = start;
-  endInput.value = end;
+  const endDate = formatDateInput(now);
+  const startDate = formatDateInput(new Date(now.getTime() - 6 * DAY_MS));
+  startInput.value = startDate;
+  endInput.value = endDate;
+}
+
+function maybeAutoAdjustRange(range, hasValues) {
+  if (!startInput || !endInput) return false;
+  if (hasValues || !range || !range.start || !range.end) return false;
+  const reqStart = startInput.value;
+  const reqEnd = endInput.value;
+  if (!reqStart || !reqEnd) return false;
+  if (reqEnd < range.start || reqStart > range.end) {
+    startInput.value = range.start;
+    endInput.value = range.end;
+    return true;
+  }
+  return false;
 }
 
 function buildQuery() {
@@ -276,7 +368,11 @@ function drawChart(labels, passData, failData, interval, cache = true) {
   }
 }
 
-async function refresh() {
+async function refresh(options = {}) {
+  const allowAutoAdjust = Object.prototype.hasOwnProperty.call(options, 'allowAutoAdjust')
+    ? Boolean(options.allowAutoAdjust)
+    : true;
+
   if (!variantSelect || !intervalSelect || !startInput || !endInput || !passEl || !failEl || !totalEl || !emptyState) {
     console.error('Production Output page is missing required elements.');
     return;
@@ -302,10 +398,35 @@ async function refresh() {
     }
 
     const payload = await res.json();
+
+    if (payload && typeof payload === 'object') {
+      if (payload.variants !== undefined) {
+        applyVariantOptions(payload.variants, variantSelect.value || 'all');
+        if (!bootstrapData) bootstrapData = {};
+        bootstrapData.variants = lastVariants.slice();
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, 'available_range')) {
+        if (!bootstrapData) bootstrapData = {};
+        bootstrapData.availableRange = payload.available_range || null;
+        if (payload.available_range) {
+          updateRangeBounds(payload.available_range);
+        } else {
+          updateRangeBounds(null);
+        }
+      }
+    }
+
     const buckets = Array.isArray(payload.buckets) ? payload.buckets : [];
     const labels = buckets.map(b => b.label);
     const passData = buckets.map(b => b.pass ?? 0);
     const failData = buckets.map(b => b.fail ?? 0);
+    const hasValues = buckets.some(b => (Number(b.pass) || 0) + (Number(b.fail) || 0));
+
+    if (allowAutoAdjust && maybeAutoAdjustRange(payload.available_range, hasValues)) {
+      setStatus('Adjusted date range to available production data. Refreshing…');
+      await refresh({ allowAutoAdjust: false });
+      return;
+    }
 
     drawChart(labels, passData, failData, payload.interval || intervalSelect.value);
 
@@ -317,7 +438,6 @@ async function refresh() {
     failEl.textContent = formatNum(failTotal);
     totalEl.textContent = formatNum(total);
 
-    const hasValues = buckets.some(b => (Number(b.pass) || 0) + (Number(b.fail) || 0));
     emptyState.hidden = hasValues;
     if (!hasValues) {
       emptyState.textContent = 'No production results for the selected filters.';
@@ -344,6 +464,9 @@ async function refresh() {
     passEl.textContent = '0';
     failEl.textContent = '0';
     totalEl.textContent = '0';
+    if (bootstrapData && Object.prototype.hasOwnProperty.call(bootstrapData, 'availableRange')) {
+      updateRangeBounds(bootstrapData.availableRange);
+    }
     setStatus(err.message || 'Failed to load production output.', false);
   } finally {
     setLoading(false);
@@ -378,16 +501,30 @@ async function init() {
   ctx = canvas.getContext('2d');
   initialized = true;
 
-  refreshBtn.addEventListener('click', refresh);
-  variantSelect.addEventListener('change', refresh);
-  intervalSelect.addEventListener('change', refresh);
-  startInput.addEventListener('change', refresh);
-  endInput.addEventListener('change', refresh);
+  const requestRefresh = (allowAutoAdjust = true) => {
+    refresh({ allowAutoAdjust }).catch(err => console.error(err));
+  };
+
+  refreshBtn.addEventListener('click', event => {
+    event.preventDefault();
+    requestRefresh();
+  });
+  variantSelect.addEventListener('change', () => requestRefresh());
+  intervalSelect.addEventListener('change', () => requestRefresh());
+  startInput.addEventListener('change', () => requestRefresh());
+  endInput.addEventListener('change', () => requestRefresh());
   window.addEventListener('resize', handleResize);
 
-  setDefaultRange();
-  bootstrapVariants();
+  const bootPayload = bootstrapVariants();
+  if (bootPayload?.availableRange) {
+    setDefaultRange(bootPayload.availableRange);
+  } else {
+    setDefaultRange();
+  }
   await loadVariants();
+  if (!startInput.value || !endInput.value) {
+    setDefaultRange();
+  }
   await refresh();
 }
 
