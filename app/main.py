@@ -113,10 +113,11 @@ def tare():
     except ADCNotReadyError as exc:
         raise HTTPException(503, "Scale is busy; please try again.") from exc
     calib = reader.get_calibration()
+    signed_scale = calib["scale_factor"] * calib.get("scale_sign", 1)
     with Session() as s:
-        c = Calibration(zero_offset=raw, scale_factor=calib["scale_factor"], notes="tare")
+        c = Calibration(zero_offset=raw, scale_factor=signed_scale, notes="tare")
         s.add(c); s.commit()
-    reader.set_calibration(raw, calib["scale_factor"])
+    reader.set_calibration(raw, signed_scale)
     return {"zero_offset": raw}
 @app.post("/api/calibrate/with-known")
 def calibrate_with_known(known_g: float = Query(..., gt=0.0)):
