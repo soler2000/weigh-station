@@ -452,7 +452,9 @@ async function refresh(options = {}) {
     }
     const intervalLabel = (payload.interval === 'hour') ? 'hour' : 'day';
     const plural = labels.length === 1 ? '' : 's';
-    const rangeText = `${payload.start ?? startInput.value || '—'} → ${payload.end ?? endInput.value || '—'}`;
+    const startLabel = payload.start ?? startInput.value ?? '';
+    const endLabel = payload.end ?? endInput.value ?? '';
+    const rangeText = `${startLabel || '—'} → ${endLabel || '—'}`;
     const variantText = variantName ? ` • ${variantName}` : '';
     setStatus(`Showing ${labels.length} ${intervalLabel}${plural} (${rangeText})${variantText}.`);
   } catch (err) {
