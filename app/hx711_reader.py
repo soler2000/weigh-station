@@ -48,14 +48,21 @@ class _HX711BitBang:
             # Return last-resort 'not ready' sentinel (None) so caller can skip
             return None
         v = 0
-        # 24 data bits, MSB first
+        # 24 data bits, MSB first. Datasheet specifies ≥0.2µs high/low pulse width;
+        # give it a generous margin to avoid sampling glitches that manifest as
+        # erratic raw values when the Pi toggles the pin too quickly.
+        pulse_delay = 0.00001  # 10 µs
         for _ in range(24):
             self.cp.value = True
+            time.sleep(pulse_delay)
             v = (v << 1) | (1 if self.dp.value else 0)
             self.cp.value = False
+            time.sleep(pulse_delay)
         # 1 extra pulse -> set Channel A, Gain 128 for next conversion
         self.cp.value = True
+        time.sleep(pulse_delay)
         self.cp.value = False
+        time.sleep(pulse_delay)
         # Sign-extend 24-bit two's complement
         if v & (1 << 23):
             v -= (1 << 24)
