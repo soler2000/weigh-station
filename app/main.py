@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, select, func, case, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 from app.models import Base, Variant, Calibration, WeighEvent
 from app.hx711_reader import ScaleReader, ADCNotReadyError
@@ -24,14 +25,28 @@ Session = sessionmaker(engine, expire_on_commit=False, future=True)
 Base.metadata.create_all(engine)
 
 # --- Backfill legacy schemas (2024 builds lacked the Variant.enabled column)
-with engine.begin() as conn:
-    info_rows = conn.execute(text("PRAGMA table_info('variants')")).fetchall()
-    column_names = {row[1] for row in info_rows}
-    if "enabled" not in column_names:
-        conn.execute(text("ALTER TABLE variants ADD COLUMN enabled BOOLEAN DEFAULT 1"))
-        conn.execute(text("UPDATE variants SET enabled = 1 WHERE enabled IS NULL"))
+_variant_schema_checked = False
 
 
+def _ensure_variant_schema(force: bool = False) -> None:
+    global _variant_schema_checked
+    if force:
+        _variant_schema_checked = False
+    if _variant_schema_checked:
+        return
+    with engine.begin() as conn:
+        info_rows = conn.execute(text("PRAGMA table_info('variants')")).fetchall()
+        column_names = {row[1] for row in info_rows}
+        if "enabled" not in column_names:
+            conn.execute(text("ALTER TABLE variants ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT 1"))
+            info_rows = conn.execute(text("PRAGMA table_info('variants')")).fetchall()
+            column_names = {row[1] for row in info_rows}
+        if "enabled" in column_names:
+            conn.execute(text("UPDATE variants SET enabled = 1 WHERE enabled IS NULL"))
+            _variant_schema_checked = True
+
+
+_ensure_variant_schema(force=True)
 app = FastAPI(title="Weigh Station")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # --- Pydantic DTOs
@@ -43,6 +58,18 @@ class VariantIn(BaseModel):
     enabled: bool = True
 class VariantOut(VariantIn):
     id: int
+
+
+def _variant_to_out(v: Variant) -> VariantOut:
+    enabled_value = True if v.enabled is None else bool(v.enabled)
+    return VariantOut(
+        id=v.id,
+        name=v.name,
+        min_g=v.min_g,
+        max_g=v.max_g,
+        unit=v.unit,
+        enabled=enabled_value,
+    )
 class WeighEventOut(BaseModel):
     id: int
     ts: str
@@ -89,25 +116,34 @@ def export_page():
 # --- Variant CRUD
 @app.get("/api/variants", response_model=List[VariantOut])
 def list_variants():
+    _ensure_variant_schema()
     with Session() as s:
-        vs = s.query(Variant).order_by(Variant.id.asc()).all()
-        return [VariantOut(id=v.id, name=v.name, min_g=v.min_g, max_g=v.max_g, unit=v.unit, enabled=v.enabled) for v in vs]
+        try:
+            vs = s.query(Variant).order_by(Variant.id.asc()).all()
+        except OperationalError:
+            s.rollback()
+            _ensure_variant_schema(force=True)
+            vs = s.query(Variant).order_by(Variant.id.asc()).all()
+        return [_variant_to_out(v) for v in vs]
 @app.post("/api/variants", response_model=VariantOut)
 def create_variant(v: VariantIn):
+    _ensure_variant_schema()
     with Session() as s:
         row = Variant(name=v.name, min_g=v.min_g, max_g=v.max_g, unit=v.unit, enabled=v.enabled)
         s.add(row); s.commit(); s.refresh(row)
-        return VariantOut(id=row.id, **v.model_dump())
+        return _variant_to_out(row)
 @app.put("/api/variants/{variant_id}", response_model=VariantOut)
 def update_variant(variant_id: int = FPath(..., ge=1), v: VariantIn = ...):
+    _ensure_variant_schema()
     with Session() as s:
         row = s.get(Variant, variant_id)
         if not row: raise HTTPException(404, "Variant not found")
         for k, val in v.model_dump().items(): setattr(row, k, val)
         s.commit(); s.refresh(row)
-        return VariantOut(id=row.id, name=row.name, min_g=row.min_g, max_g=row.max_g, unit=row.unit, enabled=row.enabled)
+        return _variant_to_out(row)
 @app.delete("/api/variants/{variant_id}")
 def delete_variant(variant_id: int = FPath(..., ge=1)):
+    _ensure_variant_schema()
     with Session() as s:
         row = s.get(Variant, variant_id)
         if not row: raise HTTPException(404, "Variant not found")

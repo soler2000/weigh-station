@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, Float, Boolean, ForeignKey, DateTime
+from sqlalchemy import String, Integer, Float, Boolean, ForeignKey, DateTime, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
@@ -14,7 +14,7 @@ class Variant(Base):
     min_g: Mapped[float] = mapped_column(Float)   # grams
     max_g: Mapped[float] = mapped_column(Float)   # grams
     unit: Mapped[str] = mapped_column(String(8), default="g")
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("1"))
 
 class Calibration(Base):
     __tablename__ = "calibration"
