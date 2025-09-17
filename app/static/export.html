@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Export Data • Weigh Station</title>
+  <link rel="stylesheet" href="/static/styles.css?v=app-theme-1">
+  <style>
+    .export-layout { display:flex; flex-direction:column; gap:18px; }
+    .export-form { display:grid; gap:16px; max-width:520px; }
+    .export-form .field { display:flex; flex-direction:column; gap:6px; }
+    .export-form label { font-size:0.72rem; letter-spacing:0.08em; text-transform:uppercase; color:var(--app-fg-muted); }
+    .export-actions { display:flex; gap:12px; flex-wrap:wrap; }
+    .export-actions button { min-width:160px; }
+    #status { min-height:1.4em; color:var(--app-fg-muted); }
+  </style>
+</head>
+<body class="app dark">
+  <header class="card topbar">
+    <div class="brand">Weigh Station</div>
+    <nav class="nav">
+      <a href="/">Home</a>
+      <a href="/settings">Settings</a>
+      <a href="/production">Production</a>
+      <a href="/stats">Stats</a>
+      <a href="/export" class="active">Export</a>
+    </nav>
+  </header>
+
+  <main class="page">
+    <section class="card">
+      <div class="export-layout">
+        <div>
+          <h1 style="margin-bottom:6px;">Export weigh data</h1>
+          <p class="muted" style="margin:0; max-width:560px;">Choose the filters that match the report you need. Leave a field blank to include all results. When you click Export, a CSV file will be prepared using the selected criteria.</p>
+        </div>
+        <form id="exportForm" class="export-form">
+          <div class="field">
+            <label for="variant">Variant</label>
+            <select id="variant" name="variant">
+              <option value="">All variants</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="operator">Operator</label>
+            <select id="operator" name="operator">
+              <option value="">All operators</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="from">From date</label>
+            <input type="date" id="from" name="from">
+          </div>
+          <div class="field">
+            <label for="to">To date</label>
+            <input type="date" id="to" name="to">
+          </div>
+          <div class="export-actions">
+            <button type="submit" id="downloadBtn">Export CSV</button>
+            <button type="button" id="resetBtn" class="secondary">Reset filters</button>
+          </div>
+          <div id="status" class="muted"></div>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/export.js"></script>
+</body>
+</html>
