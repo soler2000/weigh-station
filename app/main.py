@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, select, func, case
 from sqlalchemy.orm import sessionmaker
 from app.models import Base, Variant, Calibration, WeighEvent
-from app.hx711_reader import ScaleReader
+from app.hx711_reader import ScaleReader, ADCNotReadyError
 from app.filters import DriftFilter  # added for drift filter
 DRIFT_FILTER = DriftFilter()  # singleton drift filter
 # --- Paths (absolute so systemd WorkingDirectory issues don't blank the page)
@@ -108,23 +108,31 @@ def delete_variant(variant_id: int = FPath(..., ge=1)):
 # --- Calibration
 @app.post("/api/calibrate/tare")
 def tare():
-    raw = reader.read_raw_avg(12)
+    try:
+        raw = reader.read_raw_avg(12)
+    except ADCNotReadyError as exc:
+        raise HTTPException(503, "Scale is busy; please try again.") from exc
+    calib = reader.get_calibration()
     with Session() as s:
-        c = Calibration(zero_offset=raw, scale_factor=reader.scale_factor, notes="tare")
+        c = Calibration(zero_offset=raw, scale_factor=calib["scale_factor"], notes="tare")
         s.add(c); s.commit()
-    reader.set_calibration(raw, reader.scale_factor)
+    reader.set_calibration(raw, calib["scale_factor"])
     return {"zero_offset": raw}
 @app.post("/api/calibrate/with-known")
 def calibrate_with_known(known_g: float = Query(..., gt=0.0)):
-    raw = reader.read_raw_avg(12)
-    counts = raw - reader.zero_offset
-    if counts == 0:
-        raise HTTPException(400, "Place the known mass on the platform before calibrating.")
+    try:
+        raw = reader.read_raw_avg(12)
+    except ADCNotReadyError as exc:
+        raise HTTPException(503, "Scale is busy; please try again.") from exc
+    calib = reader.get_calibration()
+    counts = raw - calib["zero_offset"]
+    if abs(counts) < 10:
+        raise HTTPException(400, "Detected weight change is too small; place the known mass on the platform before calibrating.")
     k = counts / known_g  # counts per gram
     with Session() as s:
-        c = Calibration(zero_offset=reader.zero_offset, scale_factor=k, notes=f"M={known_g}g")
+        c = Calibration(zero_offset=calib["zero_offset"], scale_factor=k, notes=f"M={known_g}g")
         s.add(c); s.commit()
-    reader.set_calibration(reader.zero_offset, k)
+    reader.set_calibration(calib["zero_offset"], k)
     return {"scale_factor": k}
 # --- Live weight over WebSocket
 @app.websocket("/ws/weight")
