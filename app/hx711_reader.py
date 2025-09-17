@@ -16,6 +16,10 @@ def _get_pin(name: str):
         return getattr(board, "D"+name[4:])
     raise ValueError(f"Unknown pin name: {name}")
 
+class ADCNotReadyError(RuntimeError):
+    """Raised when the HX711 ADC does not present data within the retry window."""
+
+
 class _HX711BitBang:
     """
     Minimal, robust HX711 reader (Channel A @ Gain 128).
@@ -85,10 +89,13 @@ class ScaleReader:
         self.window = deque(maxlen=window)  # ~1s if hz≈10
         self.ema = None
 
+        self._adc_lock = threading.Lock()
+        self._state_lock = threading.RLock()
+
         # Calibration (we store sign separately so displayed grams are positive)
-        self.zero_offset = 0       # raw counts at zero
-        self.scale_factor = 1.0    # counts per gram (absolute)
-        self.scale_sign = 1        # +1 or -1
+        self._zero_offset = 0       # raw counts at zero
+        self._scale_factor = 1.0    # counts per gram (absolute)
+        self._scale_sign = 1        # +1 or -1
 
         self.display_precision = display_precision
         self.auto_tare_enabled = auto_tare
@@ -97,14 +104,14 @@ class ScaleReader:
         self._idle_start_ts = time.time()
 
         self.running = False
-        self.lock = threading.Lock()
         self.latest = dict(g=0.0, stable=False, raw=0)
 
     def set_calibration(self, zero_offset: int, scale_factor: float):
         # Store sign & absolute to ensure positive grams on screen
-        self.zero_offset = int(zero_offset)
-        self.scale_sign = 1 if scale_factor >= 0 else -1
-        self.scale_factor = float(abs(scale_factor) if abs(scale_factor) > 1e-9 else 1.0)
+        with self._state_lock:
+            self._zero_offset = int(zero_offset)
+            self._scale_sign = 1 if scale_factor >= 0 else -1
+            self._scale_factor = float(abs(scale_factor) if abs(scale_factor) > 1e-9 else 1.0)
 
     def start(self, hz=10):
         if self.running: return
@@ -120,31 +127,41 @@ class ScaleReader:
         if abs(g_now) < self.auto_tare_threshold_g:
             if time.time() - self._idle_start_ts >= self.auto_tare_idle_secs:
                 # Gentle offset correction (bounded)
-                error_counts = raw_now - self.zero_offset
-                step = max(-5, min(5, error_counts))
-                self.zero_offset += step
+                with self._state_lock:
+                    error_counts = raw_now - self._zero_offset
+                    step = max(-5, min(5, error_counts))
+                    self._zero_offset += step
                 self._idle_start_ts = time.time()
         else:
             self._idle_start_ts = time.time()
+
+    def _read_adc_avg_locked(self, n: int) -> int | None:
+        with self._adc_lock:
+            return self.adc.read_avg(n)
 
     def _loop(self, hz: int):
         period = 1.0 / float(hz)
         # Prime the filters
         for _ in range(max(3, self.window.maxlen // 2)):
-            raw = self.adc.read_avg(2)
+            raw = self._read_adc_avg_locked(2)
             if raw is not None:
                 self._update(raw)
             time.sleep(period)
         # Main loop
         while self.running:
-            raw = self.adc.read_avg(2)
+            raw = self._read_adc_avg_locked(2)
             if raw is not None:
                 self._update(raw)
             time.sleep(period)
 
     def _update(self, raw: int):
         # Convert counts -> grams, forcing positive grams using scale_sign
-        grams = self.scale_sign * (raw - self.zero_offset) / self.scale_factor
+        with self._state_lock:
+            zero_offset = self._zero_offset
+            scale_factor = self._scale_factor
+            scale_sign = self._scale_sign
+
+        grams = scale_sign * (raw - zero_offset) / scale_factor
 
         # median-of-window prefilter
         self.window.append(grams)
@@ -157,7 +174,7 @@ class ScaleReader:
         # optional idle auto-tare
         self._maybe_auto_tare(self.ema, raw)
 
-        with self.lock:
+        with self._state_lock:
             self.latest = dict(
                 g=round(self.ema, 1),  # 0.1 g display
                 stable=stable,
@@ -165,16 +182,24 @@ class ScaleReader:
             )
 
     def read_latest(self) -> dict:
-        with self.lock:
+        with self._state_lock:
             return dict(self.latest)
 
     # helpers for calibration endpoints
     def read_raw_avg(self, n=12) -> int:
-        r = self.adc.read_avg(n)
+        r = self._read_adc_avg_locked(n)
         if r is None:
             # not ready; try once more lightly
-            r = self.adc.read_avg(max(3, n//2))
+            r = self._read_adc_avg_locked(max(3, n//2))
         if r is None:
-            # last resort
-            return 0
+            # last resort - signal to caller that calibration should abort
+            raise ADCNotReadyError("HX711 did not become ready within the allotted retries")
         return int(r)
+
+    def get_calibration(self) -> dict:
+        with self._state_lock:
+            return dict(
+                zero_offset=self._zero_offset,
+                scale_factor=self._scale_factor,
+                scale_sign=self._scale_sign,
+            )
