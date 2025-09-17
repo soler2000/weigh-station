@@ -60,8 +60,19 @@ class VariantOut(VariantIn):
     id: int
 
 
+_FALSEY_STRINGS = {"0", "false", "f", "no", "off"}
+
+
+def _coerce_enabled(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() not in _FALSEY_STRINGS
+    return bool(value)
+
+
 def _variant_to_out(v: Variant) -> VariantOut:
-    enabled_value = True if v.enabled is None else bool(v.enabled)
+    enabled_value = _coerce_enabled(getattr(v, "enabled", True))
     return VariantOut(
         id=v.id,
         name=v.name,
@@ -123,7 +134,35 @@ def list_variants():
         except OperationalError:
             s.rollback()
             _ensure_variant_schema(force=True)
-            vs = s.query(Variant).order_by(Variant.id.asc()).all()
+            try:
+                vs = s.query(Variant).order_by(Variant.id.asc()).all()
+            except OperationalError:
+                s.rollback()
+                rows = []
+                for sql in (
+                    "SELECT id, name, min_g, max_g, unit, COALESCE(enabled, 1) AS enabled FROM variants ORDER BY id ASC",
+                    "SELECT id, name, min_g, max_g, unit, 1 AS enabled FROM variants ORDER BY id ASC",
+                    "SELECT id, name, min_g, max_g, unit FROM variants ORDER BY id ASC",
+                ):
+                    try:
+                        rows = s.execute(text(sql)).mappings().all()
+                        break
+                    except OperationalError:
+                        s.rollback()
+                        continue
+                if not rows:
+                    raise
+                return [
+                    VariantOut(
+                        id=row["id"],
+                        name=row["name"],
+                        min_g=row["min_g"],
+                        max_g=row["max_g"],
+                        unit=row.get("unit", "g"),
+                        enabled=_coerce_enabled(row.get("enabled", 1)),
+                    )
+                    for row in rows
+                ]
         return [_variant_to_out(v) for v in vs]
 @app.post("/api/variants", response_model=VariantOut)
 def create_variant(v: VariantIn):
