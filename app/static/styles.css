@@ -195,6 +195,11 @@ textarea {
     background 0.2s ease, transform 0.15s ease;
 }
 
+.filters .field input,
+.filters .field select {
+  height: 42px;
+}
+
 input:focus,
 select:focus,
 textarea:focus {
