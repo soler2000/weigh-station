@@ -6,7 +6,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Quer
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, select, func, case
+from sqlalchemy import create_engine, select, func, case, text
 from sqlalchemy.orm import sessionmaker
 from app.models import Base, Variant, Calibration, WeighEvent
 from app.hx711_reader import ScaleReader, ADCNotReadyError
@@ -22,6 +22,14 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 engine = create_engine(f"sqlite:///{DATA_DIR}/weigh.db", future=True, connect_args={"check_same_thread": False})
 Session = sessionmaker(engine, expire_on_commit=False, future=True)
 Base.metadata.create_all(engine)
+
+# --- Backfill legacy schemas (2024 builds lacked the Variant.enabled column)
+with engine.begin() as conn:
+    info_rows = conn.execute(text("PRAGMA table_info('variants')")).fetchall()
+    column_names = {row[1] for row in info_rows}
+    if "enabled" not in column_names:
+        conn.execute(text("ALTER TABLE variants ADD COLUMN enabled BOOLEAN DEFAULT 1"))
+        conn.execute(text("UPDATE variants SET enabled = 1 WHERE enabled IS NULL"))
 
 
 app = FastAPI(title="Weigh Station")
