@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, select, func, case, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import sessionmaker
 from app.models import Base, Variant, Calibration, WeighEvent
 from app.hx711_reader import ScaleReader, ADCNotReadyError
@@ -81,6 +81,38 @@ def _variant_to_out(v: Variant) -> VariantOut:
         unit=v.unit,
         enabled=enabled_value,
     )
+
+
+def _raw_variant_rows(session) -> List[VariantOut]:
+    conn = session.connection()
+    info_rows = conn.execute(text("PRAGMA table_info('variants')")).fetchall()
+    column_names = {row[1] for row in info_rows}
+    unit_expr = "unit" if "unit" in column_names else "'g'"
+    enabled_expr = "COALESCE(enabled, 1)" if "enabled" in column_names else "1"
+    sql = (
+        "SELECT id, name, min_g, max_g, "
+        f"{unit_expr} AS unit, "
+        f"{enabled_expr} AS enabled "
+        "FROM variants ORDER BY id ASC"
+    )
+    try:
+        rows = conn.execute(text(sql)).mappings().all()
+    except OperationalError as exc:
+        detail = str(getattr(exc, "orig", exc)).lower()
+        if "no such table" in detail or "no such column" in detail:
+            return []
+        raise
+    return [
+        VariantOut(
+            id=row["id"],
+            name=row["name"],
+            min_g=row["min_g"],
+            max_g=row["max_g"],
+            unit=row.get("unit", "g"),
+            enabled=_coerce_enabled(row.get("enabled", 1)),
+        )
+        for row in rows
+    ]
 class WeighEventOut(BaseModel):
     id: int
     ts: str
@@ -131,38 +163,14 @@ def list_variants():
     with Session() as s:
         try:
             vs = s.query(Variant).order_by(Variant.id.asc()).all()
-        except OperationalError:
+        except (OperationalError, ProgrammingError):
             s.rollback()
             _ensure_variant_schema(force=True)
             try:
                 vs = s.query(Variant).order_by(Variant.id.asc()).all()
-            except OperationalError:
+            except (OperationalError, ProgrammingError):
                 s.rollback()
-                rows = []
-                for sql in (
-                    "SELECT id, name, min_g, max_g, unit, COALESCE(enabled, 1) AS enabled FROM variants ORDER BY id ASC",
-                    "SELECT id, name, min_g, max_g, unit, 1 AS enabled FROM variants ORDER BY id ASC",
-                    "SELECT id, name, min_g, max_g, unit FROM variants ORDER BY id ASC",
-                ):
-                    try:
-                        rows = s.execute(text(sql)).mappings().all()
-                        break
-                    except OperationalError:
-                        s.rollback()
-                        continue
-                if not rows:
-                    raise
-                return [
-                    VariantOut(
-                        id=row["id"],
-                        name=row["name"],
-                        min_g=row["min_g"],
-                        max_g=row["max_g"],
-                        unit=row.get("unit", "g"),
-                        enabled=_coerce_enabled(row.get("enabled", 1)),
-                    )
-                    for row in rows
-                ]
+                return _raw_variant_rows(s)
         return [_variant_to_out(v) for v in vs]
 @app.post("/api/variants", response_model=VariantOut)
 def create_variant(v: VariantIn):
