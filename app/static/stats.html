@@ -56,7 +56,10 @@
       height: clamp(420px, 60vh, 680px);
       margin-top: 12px;
     }
-    #hist {
+    .chart-box.control {
+      height: clamp(360px, 50vh, 620px);
+    }
+    .chart-surface {
       width: 100%;
       height: 100%;
       display: block;
@@ -64,10 +67,11 @@
       border: 1px solid rgba(148, 163, 184, 0.22);
       border-radius: 18px;
     }
-    #legend {
+    .chart-legend {
       margin-top: 14px;
       color: var(--app-fg-muted);
       font-size: 0.9rem;
+      line-height: 1.5;
     }
     @media (max-width: 720px) {
       .filters {
@@ -149,83 +153,458 @@
       <section class="card">
         <h2 style="margin-bottom: 12px;">Distribution</h2>
         <div class="chart-box">
-          <canvas id="hist"></canvas>
+          <canvas id="hist" class="chart-surface"></canvas>
         </div>
-        <div id="legend">Loading…</div>
+        <div id="legend" class="chart-legend">Loading…</div>
+      </section>
+
+      <section class="card">
+        <h2 style="margin-bottom: 12px;">Control Chart</h2>
+        <div class="chart-box control">
+          <canvas id="control" class="chart-surface"></canvas>
+        </div>
+        <div id="controlLegend" class="chart-legend">Loading…</div>
       </section>
     </div>
   </main>
 
 <script>
-const sel=document.getElementById('variant'),fromI=document.getElementById('from'),toI=document.getElementById('to'),binsI=document.getElementById('bins');
-const btn=document.getElementById('refresh'),cvs=document.getElementById('hist'),ctx=cvs.getContext('2d'),legend=document.getElementById('legend');
-function fmt(x,d=3){return(x===null||x===undefined||Number.isNaN(Number(x)))?'–':Number(x).toFixed(d);}
-async function loadVariants(){
-  try{
-    const r=await fetch('/api/variants',{cache:'no-store'});
-    const vs=await r.json();
-    sel.innerHTML=vs.map(v=>`<option value="${v.id}" data-min="${v.min_g}" data-max="${v.max_g}">${v.name} [${v.min_g}-${v.max_g} g]</option>`).join('');
-    const now=new Date(), d7=new Date(now.getTime()-6*86400000);
-    toI.value=now.toISOString().slice(0,10); fromI.value=d7.toISOString().slice(0,10);
-  }catch(e){ console.error(e); alert('Failed to load variants'); }
-}
-function drawHistogram(edges,counts,lsl,usl){
-  const W=cvs.clientWidth,H=cvs.clientHeight; cvs.width=W; cvs.height=H;
-  const left=55,right=20,top=24,bottom=44,x0=left,x1=W-right,y0=H-bottom,y1=top;
-  ctx.clearRect(0,0,W,H);
-  ctx.strokeStyle='#6b7280'; ctx.lineWidth=1; ctx.beginPath();
-  ctx.moveTo(x0,y0); ctx.lineTo(x1,y0); ctx.moveTo(x0,y0); ctx.lineTo(x0,y1); ctx.stroke();
-  ctx.fillStyle='#a3aab7'; ctx.font='12px system-ui';
-  const maxC=Math.max(1,...counts), ticks=4;
-  for(let i=0;i<=ticks;i++){
-    const c=i*maxC/ticks, y=y0-(y0-y1)*(c/maxC);
-    ctx.fillText(String(Math.round(c)), 8, y+4);
-    ctx.strokeStyle='#22262f'; ctx.beginPath(); ctx.moveTo(x0,y); ctx.lineTo(x1,y); ctx.stroke();
-  }
-  const n=counts.length, band=(x1-x0)/n;
-  for(let i=0;i<n;i++){
-    const h=(y0-y1)*(counts[i]/maxC), bx=x0+i*band+1, bw=Math.max(1,band-2);
-    ctx.fillStyle='#7aa2ff'; ctx.globalAlpha=.55; ctx.fillRect(bx,y0-h,bw,h); ctx.globalAlpha=1;
-  }
-  if(edges.length>1){
-    const lo=edges[0], hi=edges[edges.length-1], xOf=v=>x0+(v-lo)/(hi-lo)*(x1-x0);
-    ctx.strokeStyle='#ff5858'; ctx.setLineDash([6,4]);
-    if(lsl!=null&&lsl>lo&&lsl<hi){ const x=xOf(lsl); ctx.beginPath(); ctx.moveTo(x,y0); ctx.lineTo(x,y1); ctx.stroke(); }
-    if(usl!=null&&usl>lo&&usl<hi){ const x=xOf(usl); ctx.beginPath(); ctx.moveTo(x,y0); ctx.lineTo(x,y1); ctx.stroke(); }
-    ctx.setLineDash([]);
-    ctx.fillStyle='#a3aab7'; ctx.textAlign='center';
-    ctx.fillText(lo.toFixed(2), x0, H-10);
-    ctx.fillText(((lo+hi)/2).toFixed(2), (x0+x1)/2, H-10);
-    ctx.fillText(hi.toFixed(2), x1, H-10);
-  }
-}
-async function refresh(){
-  const id=sel.value; if(!id){alert('Choose a variant');return;}
-  const q=new URLSearchParams(); q.set('variant_id',id);
-  if(fromI.value) q.set('frm',fromI.value); if(toI.value) q.set('to',toI.value);
-  q.set('bins',binsI.value||'20');
-  const r=await fetch('/api/stats/distribution?'+q.toString(),{cache:'no-store'});
-  if(!r.ok){alert('Failed to load stats');return;}
-  const d=await r.json();
-  document.getElementById('t_total').textContent=d.count??0;
-  document.getElementById('t_pass').textContent =d.pass??0;
-  document.getElementById('t_fail').textContent =d.fail??0;
-  document.getElementById('t_mean').textContent =fmt(d.mean,3);
-  document.getElementById('t_sigma').textContent=fmt(d.stdev,3);
-  document.getElementById('t_cp').textContent   =fmt(d.cp,3);
-  document.getElementById('t_cpk').textContent  =fmt(d.cpk,3);
-  document.getElementById('t_spec').textContent =`LSL=${fmt(d.lsl,2)} g • USL=${fmt(d.usl,2)} g`;
-  const edges=d.bins?.edges||[], counts=d.bins?.counts||[];
-  if(edges.length>1 && counts.length>0){
-    drawHistogram(edges,counts,d.lsl,d.usl);
-    legend.textContent=`Spec: LSL=${fmt(d.lsl,2)} g • USL=${fmt(d.usl,2)} g • Yield=${fmt(d.yield,3)}`;
-  }else{
-    ctx.clearRect(0,0,cvs.width,cvs.height);
-    legend.textContent='No data in the selected range.';
+const sel = document.getElementById('variant'),
+      fromI = document.getElementById('from'),
+      toI = document.getElementById('to'),
+      binsI = document.getElementById('bins');
+
+const btn = document.getElementById('refresh');
+const histCanvas = document.getElementById('hist');
+const histCtx = histCanvas.getContext('2d');
+const controlCanvas = document.getElementById('control');
+const controlCtx = controlCanvas.getContext('2d');
+const legend = document.getElementById('legend');
+const controlLegend = document.getElementById('controlLegend');
+
+const SQRT_TWO_PI = Math.sqrt(2 * Math.PI);
+const fmt = (x, d = 3) => (x === null || x === undefined || Number.isNaN(Number(x))) ? '–' : Number(x).toFixed(d);
+const fmt0 = (x) => (x === null || x === undefined || Number.isNaN(Number(x))) ? '–' : String(Math.round(Number(x)));
+const fmtPct = (x) => (x === null || x === undefined || Number.isNaN(Number(x))) ? '–' : `${(Number(x) * 100).toFixed(2)}%`;
+const fmtTs = (ts) => {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+const normalPdf = (x, mean, stdev) => {
+  if (!Number.isFinite(mean) || !Number.isFinite(stdev) || stdev <= 0) return 0;
+  const z = (x - mean) / stdev;
+  return Math.exp(-0.5 * z * z) / (stdev * SQRT_TWO_PI);
+};
+
+let lastData = null;
+
+async function loadVariants() {
+  try {
+    const r = await fetch('/api/variants', { cache: 'no-store' });
+    const vs = await r.json();
+    sel.innerHTML = vs.map(v => `<option value="${v.id}" data-min="${v.min_g}" data-max="${v.max_g}">${v.name} [${v.min_g}-${v.max_g} ${v.unit}]</option>`).join('');
+    if (vs.length) {
+      const now = new Date();
+      const d7 = new Date(now.getTime() - 6 * 86400000);
+      toI.value = now.toISOString().slice(0, 10);
+      fromI.value = d7.toISOString().slice(0, 10);
+    }
+  } catch (err) {
+    console.error(err);
+    alert('Failed to load variants');
   }
 }
-document.getElementById('refresh').addEventListener('click', refresh);
-(async function(){ await loadVariants(); await refresh(); })();
+
+function toNumber(val) {
+  const num = Number(val);
+  return Number.isFinite(num) ? num : null;
+}
+
+function drawHistogram(data) {
+  const edges = (data?.bins?.edges ?? []).map(Number);
+  const counts = (data?.bins?.counts ?? []).map(Number);
+  const hasData = edges.length > 1 && counts.some(c => c > 0);
+  const W = histCanvas.clientWidth;
+  const H = histCanvas.clientHeight;
+  histCanvas.width = W;
+  histCanvas.height = H;
+  histCtx.clearRect(0, 0, W, H);
+
+  if (!hasData) {
+    histCtx.fillStyle = '#a3aab7';
+    histCtx.font = '14px system-ui';
+    histCtx.fillText('No data', 24, 28);
+    return false;
+  }
+
+  const left = 60, right = 24, top = 28, bottom = 48;
+  const x0 = left, x1 = W - right;
+  const y0 = H - bottom, y1 = top;
+  const plotW = x1 - x0;
+  const plotH = y0 - y1;
+
+  histCtx.strokeStyle = '#374151';
+  histCtx.lineWidth = 1;
+  histCtx.beginPath();
+  histCtx.moveTo(x0, y0);
+  histCtx.lineTo(x1, y0);
+  histCtx.moveTo(x0, y0);
+  histCtx.lineTo(x0, y1);
+  histCtx.stroke();
+
+  const maxCount = counts.reduce((m, c) => Math.max(m, c), 0);
+  const ticks = 5;
+  histCtx.strokeStyle = 'rgba(148, 163, 184, 0.18)';
+  histCtx.fillStyle = '#9ca3af';
+  histCtx.font = '12px system-ui';
+  histCtx.textAlign = 'right';
+  for (let i = 0; i <= ticks; i++) {
+    const frac = i / ticks;
+    const value = Math.round(frac * maxCount);
+    const y = y0 - frac * plotH;
+    histCtx.beginPath();
+    histCtx.moveTo(x0, y);
+    histCtx.lineTo(x1, y);
+    histCtx.stroke();
+    histCtx.fillText(String(value), x0 - 8, y + 4);
+  }
+
+  const dataDomainMin = Number(edges[0]);
+  const dataDomainMax = Number(edges[edges.length - 1]);
+  const overlayVals = [
+    toNumber(data?.lsl),
+    toNumber(data?.usl),
+    toNumber(data?.control?.lcl),
+    toNumber(data?.control?.ucl),
+  ].filter(v => v !== null);
+  let domainMin = dataDomainMin;
+  let domainMax = dataDomainMax;
+  if (overlayVals.length) {
+    domainMin = Math.min(domainMin, ...overlayVals);
+    domainMax = Math.max(domainMax, ...overlayVals);
+  }
+  if (!Number.isFinite(domainMin) || !Number.isFinite(domainMax) || domainMin === domainMax) {
+    domainMin = dataDomainMin;
+    domainMax = dataDomainMax;
+  }
+  if (domainMin === domainMax) {
+    domainMin -= 0.5;
+    domainMax += 0.5;
+  }
+  const pad = Math.max(0.001, (domainMax - domainMin) * 0.04);
+  domainMin -= pad;
+  domainMax += pad;
+  const mean = Number(data?.mean);
+  const stdev = Number(data?.stdev);
+  const xOf = (val) => x0 + ((val - domainMin) / (domainMax - domainMin)) * plotW;
+
+  const bins = counts.length;
+  histCtx.globalAlpha = 0.55;
+  histCtx.fillStyle = '#60a5fa';
+  for (let i = 0; i < bins; i++) {
+    const h = (counts[i] / maxCount) * plotH;
+    const edgeStart = Number(edges[i]);
+    const edgeEnd = Number(edges[i + 1]);
+    const px0 = xOf(edgeStart);
+    const px1 = xOf(edgeEnd);
+    const leftPx = Math.min(px0, px1);
+    const widthPx = Math.max(1, Math.abs(px1 - px0) - 2);
+    histCtx.fillRect(leftPx + 1, y0 - h, widthPx, h);
+  }
+  histCtx.globalAlpha = 1;
+
+  const drawV = (val, color, dash, label) => {
+    if (val === null || val === undefined) return;
+    const num = Number(val);
+    if (!Number.isFinite(num) || num < domainMin || num > domainMax) return;
+    const x = xOf(num);
+    histCtx.save();
+    histCtx.strokeStyle = color;
+    histCtx.lineWidth = 2;
+    if (dash) histCtx.setLineDash(dash);
+    histCtx.beginPath();
+    histCtx.moveTo(x, y1);
+    histCtx.lineTo(x, y0);
+    histCtx.stroke();
+    histCtx.setLineDash([]);
+    histCtx.fillStyle = color;
+    histCtx.font = '12px system-ui';
+    const alignLeft = x < x1 - 48;
+    histCtx.textAlign = alignLeft ? 'left' : 'right';
+    const labelX = alignLeft ? x + 6 : x - 6;
+    histCtx.fillText(label, labelX, y1 + 14);
+    histCtx.restore();
+  };
+
+  drawV(data?.lsl, '#f87171', [6, 4], 'LSL');
+  drawV(data?.usl, '#f87171', [6, 4], 'USL');
+  drawV(data?.control?.lcl, '#22d3ee', [4, 6], 'LCL');
+  drawV(data?.control?.ucl, '#22d3ee', [4, 6], 'UCL');
+  drawV(mean, '#facc15', null, 'μ');
+
+  histCtx.fillStyle = '#9ca3af';
+  histCtx.font = '12px system-ui';
+  histCtx.textAlign = 'center';
+  histCtx.fillText(domainMin.toFixed(2), x0, H - 18);
+  histCtx.fillText(((domainMin + domainMax) / 2).toFixed(2), (x0 + x1) / 2, H - 18);
+  histCtx.fillText(domainMax.toFixed(2), x1, H - 18);
+
+  if (Number.isFinite(mean) && Number.isFinite(stdev) && stdev > 0) {
+    const total = (typeof data?.count === 'number')
+      ? Number(data.count)
+      : counts.reduce((sum, c) => sum + c, 0);
+    const stepCount = Math.min(600, Math.max(120, bins * 24));
+    const dataSpan = dataDomainMax - dataDomainMin;
+    const sampleBinWidth = dataSpan > 0 ? dataSpan / bins : (domainMax - domainMin) / bins;
+    histCtx.beginPath();
+    for (let i = 0; i <= stepCount; i++) {
+      const frac = i / stepCount;
+      const xVal = dataDomainMin + frac * (dataDomainMax - dataDomainMin);
+      const expected = total * sampleBinWidth * normalPdf(xVal, mean, stdev);
+      const y = y0 - (expected / maxCount) * plotH;
+      const x = xOf(xVal);
+      if (i === 0) histCtx.moveTo(x, y);
+      else histCtx.lineTo(x, y);
+    }
+    histCtx.strokeStyle = '#facc15';
+    histCtx.lineWidth = 2;
+    histCtx.globalAlpha = 0.9;
+    histCtx.stroke();
+    histCtx.globalAlpha = 1;
+  }
+
+  return true;
+}
+
+function drawControlChart(controlData) {
+  const series = Array.isArray(controlData?.series) ? controlData.series : [];
+  const W = controlCanvas.clientWidth;
+  const H = controlCanvas.clientHeight;
+  controlCanvas.width = W;
+  controlCanvas.height = H;
+  controlCtx.clearRect(0, 0, W, H);
+
+  if (!series.length) {
+    controlCtx.fillStyle = '#a3aab7';
+    controlCtx.font = '14px system-ui';
+    controlCtx.fillText('No data', 24, 28);
+    return false;
+  }
+
+  const left = 60, right = 24, top = 28, bottom = 48;
+  const x0 = left, x1 = W - right;
+  const y0 = H - bottom, y1 = top;
+  const plotW = x1 - x0;
+  const plotH = y0 - y1;
+
+  const values = series
+    .map(pt => Number(pt.value))
+    .filter(v => Number.isFinite(v));
+  if (!values.length) {
+    controlCtx.fillStyle = '#a3aab7';
+    controlCtx.font = '14px system-ui';
+    controlCtx.fillText('No numeric data', 24, 28);
+    return false;
+  }
+
+  let minY = Math.min(...values);
+  let maxY = Math.max(...values);
+  const extras = [controlData?.center, controlData?.ucl, controlData?.lcl]
+    .filter(v => v !== null && v !== undefined && Number.isFinite(Number(v)))
+    .map(Number);
+  if (extras.length) {
+    minY = Math.min(minY, ...extras);
+    maxY = Math.max(maxY, ...extras);
+  }
+  if (minY === maxY) {
+    minY -= 1;
+    maxY += 1;
+  }
+  const pad = (maxY - minY) * 0.1;
+  minY -= pad;
+  maxY += pad;
+
+  const yOf = (val) => y0 - ((val - minY) / (maxY - minY)) * plotH;
+  const xOfIdx = (idx) => series.length === 1 ? (x0 + plotW / 2) : x0 + (idx / (series.length - 1)) * plotW;
+
+  controlCtx.strokeStyle = '#374151';
+  controlCtx.lineWidth = 1;
+  controlCtx.beginPath();
+  controlCtx.moveTo(x0, y0);
+  controlCtx.lineTo(x1, y0);
+  controlCtx.moveTo(x0, y0);
+  controlCtx.lineTo(x0, y1);
+  controlCtx.stroke();
+
+  controlCtx.strokeStyle = 'rgba(148, 163, 184, 0.18)';
+  controlCtx.fillStyle = '#9ca3af';
+  controlCtx.font = '12px system-ui';
+  controlCtx.textAlign = 'right';
+  const ticks = 5;
+  for (let i = 0; i <= ticks; i++) {
+    const frac = i / ticks;
+    const value = minY + frac * (maxY - minY);
+    const y = y0 - frac * plotH;
+    controlCtx.beginPath();
+    controlCtx.moveTo(x0, y);
+    controlCtx.lineTo(x1, y);
+    controlCtx.stroke();
+    controlCtx.fillText(value.toFixed(2), x0 - 8, y + 4);
+  }
+
+  const drawH = (val, color, dash, label) => {
+    if (val === null || val === undefined || Number.isNaN(Number(val))) return;
+    const num = Number(val);
+    const y = yOf(num);
+    controlCtx.save();
+    controlCtx.strokeStyle = color;
+    controlCtx.lineWidth = 2;
+    if (dash) controlCtx.setLineDash(dash);
+    controlCtx.beginPath();
+    controlCtx.moveTo(x0, y);
+    controlCtx.lineTo(x1, y);
+    controlCtx.stroke();
+    controlCtx.setLineDash([]);
+    controlCtx.fillStyle = color;
+    controlCtx.font = '12px system-ui';
+    const rightLabelX = x1 + 8;
+    const labelX = rightLabelX > W - 4 ? x1 - 48 : rightLabelX;
+    controlCtx.textAlign = rightLabelX > W - 4 ? 'right' : 'left';
+    controlCtx.fillText(label, labelX, y - 4);
+    controlCtx.restore();
+  };
+
+  drawH(controlData?.ucl, '#22d3ee', [6, 4], 'UCL');
+  drawH(controlData?.center, '#facc15', [4, 4], 'CL');
+  drawH(controlData?.lcl, '#22d3ee', [6, 4], 'LCL');
+
+  controlCtx.strokeStyle = '#93c5fd';
+  controlCtx.lineWidth = 2;
+  controlCtx.beginPath();
+  let hasStroke = false;
+  series.forEach((pt, idx) => {
+    const value = Number(pt.value);
+    if (!Number.isFinite(value)) {
+      hasStroke = false;
+      return;
+    }
+    const x = xOfIdx(idx);
+    const y = yOf(value);
+    if (!hasStroke) {
+      controlCtx.moveTo(x, y);
+      hasStroke = true;
+    } else {
+      controlCtx.lineTo(x, y);
+    }
+  });
+  if (hasStroke) {
+    controlCtx.stroke();
+  }
+
+  controlCtx.fillStyle = '#2563eb';
+  series.forEach((pt, idx) => {
+    const value = Number(pt.value);
+    if (!Number.isFinite(value)) return;
+    const x = xOfIdx(idx);
+    const y = yOf(value);
+    controlCtx.beginPath();
+    controlCtx.arc(x, y, 3, 0, Math.PI * 2);
+    controlCtx.fill();
+  });
+
+  controlCtx.fillStyle = '#9ca3af';
+  controlCtx.font = '12px system-ui';
+  controlCtx.textAlign = 'center';
+  if (series.length >= 1) controlCtx.fillText(fmtTs(series[0].ts), x0, H - 18);
+  if (series.length >= 3) {
+    const midIdx = Math.floor((series.length - 1) / 2);
+    controlCtx.fillText(fmtTs(series[midIdx].ts), (x0 + x1) / 2, H - 18);
+  }
+  if (series.length >= 2) controlCtx.fillText(fmtTs(series[series.length - 1].ts), x1, H - 18);
+
+  return true;
+}
+
+async function refresh() {
+  const id = sel.value;
+  if (!id) { alert('Choose a variant'); return; }
+  const q = new URLSearchParams();
+  q.set('variant_id', id);
+  if (fromI.value) q.set('frm', fromI.value);
+  if (toI.value) q.set('to', toI.value);
+  q.set('bins', binsI.value || '20');
+
+  const r = await fetch('/api/stats/distribution?' + q.toString(), { cache: 'no-store' });
+  if (!r.ok) { alert('Failed to load stats'); return; }
+  const d = await r.json();
+  lastData = d;
+
+  const unit = d.unit || 'g';
+  document.getElementById('t_total').textContent = fmt0(d.count ?? 0);
+  document.getElementById('t_pass').textContent = fmt0(d.pass ?? 0);
+  document.getElementById('t_fail').textContent = fmt0(d.fail ?? 0);
+  document.getElementById('t_mean').textContent = fmt(d.mean, 3);
+  document.getElementById('t_sigma').textContent = fmt(d.stdev, 3);
+  document.getElementById('t_cp').textContent = fmt(d.cp, 3);
+  document.getElementById('t_cpk').textContent = fmt(d.cpk, 3);
+  document.getElementById('t_spec').textContent = `LSL=${fmt(d.lsl, 2)} ${unit} • USL=${fmt(d.usl, 2)} ${unit}`;
+
+  const histHasData = drawHistogram(d);
+  if (histHasData && d.bins?.edges?.length > 1) {
+    const edges = d.bins.edges;
+    const rangeText = `${fmt(edges[0], 2)} – ${fmt(edges[edges.length - 1], 2)} ${unit}`;
+    const parts = [
+      `Range: ${rangeText}`,
+      `Bins: ${edges.length - 1}`,
+      `μ=${fmt(d.mean, 3)} ${unit}`,
+      `σ=${fmt(d.stdev, 3)} ${unit}`,
+      `Spec: ${fmt(d.lsl, 2)} – ${fmt(d.usl, 2)} ${unit}`,
+    ];
+    if (d.control && d.control.lcl !== null && d.control.ucl !== null) {
+      parts.push(`Control: ${fmt(d.control.lcl, 2)} – ${fmt(d.control.ucl, 2)} ${unit}`);
+    }
+    parts.push(`Yield: ${fmtPct(d.yield)}`);
+    legend.textContent = parts.join(' • ');
+  } else {
+    legend.textContent = 'No data in the selected range.';
+  }
+
+  const controlHasData = drawControlChart(d.control || null);
+  if (controlHasData) {
+    const segments = [`Samples: ${fmt0(d.count ?? 0)}`];
+    if (d.control?.series?.length) {
+      const first = d.control.series[0]?.ts;
+      const last = d.control.series[d.control.series.length - 1]?.ts;
+      if (first && last) {
+        segments.push(`Range: ${fmtTs(first)} → ${fmtTs(last)}`);
+      }
+    }
+    segments.push(`CL=${fmt(d.control?.center, 3)} ${unit}`);
+    segments.push(`LCL=${fmt(d.control?.lcl, 3)} ${unit}`);
+    segments.push(`UCL=${fmt(d.control?.ucl, 3)} ${unit}`);
+    controlLegend.textContent = segments.join(' • ');
+  } else {
+    controlLegend.textContent = 'No data in the selected range.';
+  }
+}
+
+btn.addEventListener('click', refresh);
+
+window.addEventListener('resize', () => {
+  if (lastData) {
+    drawHistogram(lastData);
+    drawControlChart(lastData.control || null);
+  }
+});
+
+(async function () {
+  await loadVariants();
+  await refresh();
+})();
 </script>
+
 </body>
 </html>

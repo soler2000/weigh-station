@@ -492,7 +492,8 @@ def stats_distribution(
             q = q.filter(WeighEvent.ts >= _parse_day(frm))
         if to:
             q = q.filter(WeighEvent.ts < (_parse_day(to) + timedelta(days=1)))
-        vals = [float(r.net_g) for r in q.order_by(WeighEvent.ts.asc()).all()]
+        rows = q.order_by(WeighEvent.ts.asc()).all()
+        vals = [float(r.net_g) for r in rows]
         n = len(vals)
         if n == 0:
             return {
@@ -500,7 +501,9 @@ def stats_distribution(
                 "lsl": float(v.min_g), "usl": float(v.max_g),
                 "cp": None, "cpk": None,
                 "pass": 0, "fail": 0, "yield": None,
-                "bins": {"edges": [], "counts": []}
+                "bins": {"edges": [], "counts": []},
+                "control": {"series": [], "center": None, "ucl": None, "lcl": None},
+                "unit": v.unit,
             }
         # basic stats
         s1 = sum(vals)
@@ -530,13 +533,40 @@ def stats_distribution(
             cpk = min(cpu, cpl)
         else:
             cp = None; cpk = None
-        def rd(x, d=4): 
+        if stdev and stdev > 0:
+            ucl = mean + 3.0 * stdev
+            lcl = mean - 3.0 * stdev
+        else:
+            ucl = mean
+            lcl = mean
+        def rd(x, d=4):
             return None if x is None else (round(x, d))
+        def _control_value(row: WeighEvent) -> float | None:
+            if row.net_g is not None:
+                return rd(float(row.net_g), 4)
+            if row.gross_g is not None:
+                return rd(float(row.gross_g), 4)
+            return None
+
+        control_series = [
+            {
+                "ts": r.ts.isoformat(),
+                "value": _control_value(r),
+            }
+            for r in rows
+        ]
         return {
             "count": n, "mean": rd(mean,4), "stdev": rd(stdev,4),
             "min": rd(min(vals),4), "max": rd(max(vals),4),
             "lsl": rd(lsl,4), "usl": rd(usl,4),
             "cp": rd(cp,3), "cpk": rd(cpk,3),
             "pass": passed, "fail": failed, "yield": rd(yld,4),
-            "bins": {"edges": [round(e,4) for e in edges], "counts": counts}
+            "bins": {"edges": [round(e,4) for e in edges], "counts": counts},
+            "control": {
+                "series": control_series,
+                "center": rd(mean, 4),
+                "ucl": rd(ucl, 4),
+                "lcl": rd(lcl, 4),
+            },
+            "unit": v.unit,
         }
