@@ -13,6 +13,25 @@ let ctx;
 
 let cachedChart = { labels: [], pass: [], fail: [], interval: 'day' };
 
+function resizeCanvas(canvasEl, context) {
+  if (!canvasEl || !context) return { width: 0, height: 0 };
+  const cssWidth = canvasEl.clientWidth || 0;
+  const cssHeight = canvasEl.clientHeight || 0;
+  const dpr = window.devicePixelRatio || 1;
+  const pixelWidth = Math.max(1, Math.round(cssWidth * dpr));
+  const pixelHeight = Math.max(1, Math.round(cssHeight * dpr));
+
+  if (canvasEl.width !== pixelWidth || canvasEl.height !== pixelHeight) {
+    canvasEl.width = pixelWidth;
+    canvasEl.height = pixelHeight;
+  }
+
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.clearRect(0, 0, canvasEl.width, canvasEl.height);
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { width: cssWidth, height: cssHeight };
+}
+
 function setStatus(message, ok = true) {
   if (!statusEl) return;
   statusEl.textContent = message || '';
@@ -90,11 +109,13 @@ function buildQuery() {
 
 function drawChart(labels, passData, failData, interval, cache = true) {
   if (!canvas || !ctx) return;
-  const width = canvas.clientWidth || 960;
-  const height = canvas.clientHeight || 420;
-  canvas.width = width;
-  canvas.height = height;
-  ctx.clearRect(0, 0, width, height);
+  const { width, height } = resizeCanvas(canvas, ctx);
+  if (!width || !height) {
+    if (cache) {
+      cachedChart = { labels: [], pass: [], fail: [], interval };
+    }
+    return;
+  }
 
   if (!labels.length) {
     if (cache) {

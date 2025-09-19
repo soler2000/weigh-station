@@ -182,6 +182,26 @@ const controlCtx = controlCanvas.getContext('2d');
 const legend = document.getElementById('legend');
 const controlLegend = document.getElementById('controlLegend');
 
+function resizeCanvas(canvasEl, context) {
+  if (!canvasEl || !context) return { width: 0, height: 0 };
+  const cssWidth = canvasEl.clientWidth || 0;
+  const cssHeight = canvasEl.clientHeight || 0;
+  const dpr = window.devicePixelRatio || 1;
+  const pixelWidth = Math.max(1, Math.round(cssWidth * dpr));
+  const pixelHeight = Math.max(1, Math.round(cssHeight * dpr));
+
+  if (canvasEl.width !== pixelWidth || canvasEl.height !== pixelHeight) {
+    canvasEl.width = pixelWidth;
+    canvasEl.height = pixelHeight;
+  }
+
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.clearRect(0, 0, canvasEl.width, canvasEl.height);
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  return { width: cssWidth, height: cssHeight };
+}
+
 const SQRT_TWO_PI = Math.sqrt(2 * Math.PI);
 const fmt = (x, d = 3) => (x === null || x === undefined || Number.isNaN(Number(x))) ? '–' : Number(x).toFixed(d);
 const fmt0 = (x) => (x === null || x === undefined || Number.isNaN(Number(x))) ? '–' : String(Math.round(Number(x)));
@@ -227,11 +247,8 @@ function drawHistogram(data) {
   const edges = (data?.bins?.edges ?? []).map(Number);
   const counts = (data?.bins?.counts ?? []).map(Number);
   const hasData = edges.length > 1 && counts.some(c => c > 0);
-  const W = histCanvas.clientWidth;
-  const H = histCanvas.clientHeight;
-  histCanvas.width = W;
-  histCanvas.height = H;
-  histCtx.clearRect(0, 0, W, H);
+  const { width: W, height: H } = resizeCanvas(histCanvas, histCtx);
+  if (!W || !H) return false;
 
   if (!hasData) {
     histCtx.fillStyle = '#a3aab7';
@@ -381,11 +398,8 @@ function drawHistogram(data) {
 
 function drawControlChart(controlData) {
   const series = Array.isArray(controlData?.series) ? controlData.series : [];
-  const W = controlCanvas.clientWidth;
-  const H = controlCanvas.clientHeight;
-  controlCanvas.width = W;
-  controlCanvas.height = H;
-  controlCtx.clearRect(0, 0, W, H);
+  const { width: W, height: H } = resizeCanvas(controlCanvas, controlCtx);
+  if (!W || !H) return false;
 
   if (!series.length) {
     controlCtx.fillStyle = '#a3aab7';
