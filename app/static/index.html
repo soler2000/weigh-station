@@ -15,7 +15,10 @@
 
     .reading-card{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:40vh}
     .reading{font-weight:800;font-size:clamp(56px,12vw,144px);line-height:1;letter-spacing:-.02em}
-    .reading-sub{opacity:.75;margin-top:6px}
+    .reading-sub{opacity:.85;margin-top:6px;transition:color .2s ease}
+    .reading-sub.is-stable{color:#23ad4e}
+    .reading-sub.is-unstable{color:#d63939}
+    .reading-sub.is-measuring{color:#c28d1a}
     .status--pass{ background: rgba(35,173,78,.08) }  /* soft green tint */
     .status--fail{ background: rgba(214,57,57,.08) } /* soft red tint  */
 
@@ -48,7 +51,7 @@
       <!-- Left: live reading -->
       <section class="card reading-card" id="readingCard">
         <div id="reading" class="reading">0.0 g</div>
-        <div id="readingSub" class="reading-sub">Waiting for scale…</div>
+        <div id="readingSub" class="reading-sub is-measuring">Waiting for scale…</div>
       </section>
 
       <!-- Right: controls -->
@@ -112,8 +115,19 @@ async function loadVariants(){
 
 function updateScreen(d){
   $('reading').textContent = fmtG(d.g);
-  const status = (d.stable === true) ? 'Stable' : (d.stable === false ? 'Unstable' : 'Measuring');
-  $('readingSub').textContent = `${status} • ${new Date().toLocaleTimeString()}`;
+  const sub = $('readingSub');
+  let status = 'Measuring';
+  let statusClass = 'is-measuring';
+  if(d.stable === true){
+    status = 'Stable';
+    statusClass = 'is-stable';
+  }else if(d.stable === false){
+    status = 'Unstable';
+    statusClass = 'is-unstable';
+  }
+  sub.textContent = `${status} • ${new Date().toLocaleTimeString()}`;
+  sub.classList.remove('is-stable','is-unstable','is-measuring');
+  sub.classList.add(statusClass);
   if(currentVariant){
     const ok = (d.g >= currentVariant.min_g && d.g <= currentVariant.max_g);
     tint(ok);

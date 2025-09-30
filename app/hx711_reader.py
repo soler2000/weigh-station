@@ -417,7 +417,19 @@ class ScaleReader:
                     continue
                 return _apply_unit(value, unit_token)
 
-        # 4) Fall back to the first reasonable numeric token.
+        # 4) Fall back to the first reasonable numeric token and assume the
+        #    indicator's configured base unit (the B140 streams kilograms when
+        #    no unit is included).
+        default_multiplier = kg_factor
+
+        upper_tokens = [tok.upper() for tok in tokens]
+        if any(tok in {"G", "GRAM", "GRAMS"} for tok in upper_tokens):
+            default_multiplier = 1.0
+        elif any(tok in {"LB", "LBS", "POUND", "POUNDS"} for tok in upper_tokens):
+            default_multiplier = 453.59237
+        elif any(tok in {"OZ", "OZS", "OUNCE", "OUNCES"} for tok in upper_tokens):
+            default_multiplier = 28.349523125
+
         for token in tokens:
             match = self._NUMBER_RE.search(token)
             if not match:
@@ -429,7 +441,7 @@ class ScaleReader:
             # Skip obviously non-weight numbers (timestamps etc.).
             if abs(value) > 1e6:
                 continue
-            return value
+            return value * default_multiplier
 
         return None
 
