@@ -130,6 +130,22 @@ def list_variants():
     with Session() as s:
         vs = s.query(Variant).order_by(Variant.id.asc()).all()
         return [VariantOut(id=v.id, name=v.name, min_g=v.min_g, max_g=v.max_g, unit=v.unit, enabled=v.enabled) for v in vs]
+
+
+@app.get("/api/production/variants")
+def production_variants():
+    with Session() as s:
+        rows = (
+            s.query(Variant.id, Variant.name)
+            .order_by(Variant.name.asc())
+            .all()
+        )
+    items = []
+    for row in rows:
+        vid = row[0]
+        label = (row[1] or "").strip() or f"Variant {vid}"
+        items.append({"id": vid, "name": label})
+    return {"items": items}
 @app.post("/api/variants", response_model=VariantOut)
 def create_variant(v: VariantIn):
     with Session() as s:

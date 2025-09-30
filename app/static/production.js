@@ -30,19 +30,28 @@ function formatNum(value) {
   return num.toLocaleString();
 }
 
+async function fetchVariants() {
+  const endpoints = ['/api/production/variants', '/api/variants'];
+  for (const url of endpoints) {
+    try {
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`Request failed: ${url}`);
+      const payload = await res.json();
+      if (Array.isArray(payload)) return payload;
+      if (Array.isArray(payload?.items)) return payload.items;
+    } catch (err) {
+      console.warn('Variant fetch failed', url, err);
+    }
+  }
+  return [];
+}
+
 async function loadVariants() {
   if (!variantSelect) return;
   const current = variantSelect.value || 'all';
   try {
-    const res = await fetch('/api/variants', { cache: 'no-store' });
-    if (!res.ok) throw new Error('Failed to load variants');
-    const payload = await res.json();
-    const variants = Array.isArray(payload)
-      ? payload
-      : Array.isArray(payload?.items)
-        ? payload.items
-        : [];
-    const options = ['<option value="all">All Versions</option>'];
+    const variants = await fetchVariants();
+    const options = ['<option value="all">All Variants</option>'];
     for (const v of variants) {
       const id = v?.id ?? v?.value;
       const label = (v && (v.name || v.label || v.display)) ?? `Version ${id ?? ''}`;
@@ -56,13 +65,13 @@ async function loadVariants() {
       variantSelect.value = 'all';
     }
     if (variants.length === 0) {
-      setStatus('Showing all versions (none configured yet).');
+      setStatus('Showing all variants (none configured yet).');
     }
   } catch (err) {
     console.error(err);
-    variantSelect.innerHTML = '<option value="all">All Versions</option>';
+    variantSelect.innerHTML = '<option value="all">All Variants</option>';
     variantSelect.value = 'all';
-    setStatus('Failed to load versions.', false);
+    setStatus('Failed to load variants.', false);
   }
 }
 
