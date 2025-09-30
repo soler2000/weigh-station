@@ -117,6 +117,10 @@
             <select id="variant" style="min-width: 220px"></select>
           </div>
           <div class="field">
+            <label for="mouldingSerial">Moulding Serial</label>
+            <input id="mouldingSerial" type="text" placeholder="Filter by moulding serial">
+          </div>
+          <div class="field">
             <label for="from">From</label>
             <input id="from" type="date">
           </div>
@@ -174,6 +178,7 @@
 
 <script>
 const sel = document.getElementById('variant'),
+      mouldingI = document.getElementById('mouldingSerial'),
       fromI = document.getElementById('from'),
       toI = document.getElementById('to'),
       binsI = document.getElementById('bins');
@@ -537,6 +542,8 @@ async function refresh() {
   if (!id) { alert('Choose a variant'); return; }
   const q = new URLSearchParams();
   q.set('variant_id', id);
+  const moulding = (mouldingI?.value || '').trim();
+  if (moulding) q.set('moulding_serial', moulding);
   if (fromI.value) q.set('frm', fromI.value);
   if (toI.value) q.set('to', toI.value);
   q.set('bins', binsI.value || '20');

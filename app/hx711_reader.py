@@ -85,7 +85,9 @@ class ScaleReader:
         self.native_counts_per_gram = (
             native_counts_per_gram or _env_float("SCALE_NATIVE_COUNTS_PER_GRAM", 1000.0)
         )
-        self.kg_to_grams = max(1.0, _env_float("SCALE_KG_TO_GRAMS", 100.0))
+        kg_factor = _env_float("SCALE_KG_TO_GRAMS", 100.0)
+        self.kg_to_grams = kg_factor if kg_factor > 0 else 100.0
+        self.net_default_unit = self._coerce_net_unit(os.getenv("SCALE_NET_UNIT", "auto"))
 
         self.bytesize = self._coerce_bytesize(os.getenv("SCALE_BYTESIZE"))
         self.parity = self._coerce_parity(os.getenv("SCALE_PARITY"))
@@ -309,21 +311,24 @@ class ScaleReader:
 
     def _parse_line(self, text: str) -> tuple[float, int, bool | None] | None:
         """Return (grams, raw_counts, stable_hint) if line parsed; else None."""
-        tokens = [tok.strip() for tok in self._LINE_SPLIT_RE.split(text) if tok.strip()]
+        clean_text = "".join(
+            ch for ch in text if (ch.isprintable() or ch in {"\r", "\n", "\t"})
+        )
+        working_text = clean_text or text
+        tokens = [tok.strip() for tok in self._LINE_SPLIT_RE.split(working_text) if tok.strip()]
         if not tokens:
             return None
 
-        upper_tokens = [tok.upper() for tok in tokens]
-
         stable_hint: bool | None = None
-        for tok in upper_tokens:
-            if tok in {"US", "UN", "UNSTABLE"}:
+        for tok in tokens:
+            upper = tok.upper()
+            if upper.startswith("US") or "UNSTABLE" in upper:
                 stable_hint = False
                 break
-            if tok in {"ST", "STABLE"}:
+            if upper.startswith("ST") or "STABLE" in upper:
                 stable_hint = True
 
-        grams = self._extract_grams(text, tokens)
+        grams = self._extract_grams(working_text, tokens)
         if grams is None:
             return None
 
@@ -356,8 +361,18 @@ class ScaleReader:
                 unit = net_match.group(2)
                 if unit:
                     return _apply_unit(value, unit)
-                # Default verbose printouts are configured in kilograms; fall back to kg.
-                return _apply_unit(value, "kg")
+                fallback_unit = self.net_default_unit
+                if fallback_unit == "auto":
+                    text_upper = text.upper()
+                    if "KG" in text_upper or "KILOGRAM" in text_upper:
+                        fallback_unit = "kg"
+                    elif any(token in text_upper for token in ("LB", "LBS", "POUND", "POUNDS")):
+                        fallback_unit = "lb"
+                    elif any(token in text_upper for token in ("OZ", "OZS", "OUNCE", "OUNCES")):
+                        fallback_unit = "oz"
+                    else:
+                        fallback_unit = "g"
+                return _apply_unit(value, fallback_unit)
 
         # If the frame includes other verbose ticket fields (Gross, Tare, etc.) but no
         # usable Net value, ignore it so we do not treat those as live weights.
@@ -421,6 +436,12 @@ class ScaleReader:
         #    indicator's configured base unit (the B140 streams kilograms when
         #    no unit is included).
         default_multiplier = kg_factor
+        if self.net_default_unit == "g":
+            default_multiplier = 1.0
+        elif self.net_default_unit == "lb":
+            default_multiplier = 453.59237
+        elif self.net_default_unit == "oz":
+            default_multiplier = 28.349523125
 
         upper_tokens = [tok.upper() for tok in tokens]
         if any(tok in {"G", "GRAM", "GRAMS"} for tok in upper_tokens):
@@ -538,3 +559,27 @@ class ScaleReader:
         if not decoded:
             decoded = "\r"
         return decoded.encode("utf-8", errors="ignore")
+
+    @staticmethod
+    def _coerce_net_unit(value: str | None) -> str:
+        if not value:
+            return "auto"
+        value = value.strip().lower()
+        mapping = {
+            "auto": "auto",
+            "kg": "kg",
+            "kilogram": "kg",
+            "kilograms": "kg",
+            "g": "g",
+            "gram": "g",
+            "grams": "g",
+            "lb": "lb",
+            "lbs": "lb",
+            "pound": "lb",
+            "pounds": "lb",
+            "oz": "oz",
+            "ozs": "oz",
+            "ounce": "oz",
+            "ounces": "oz",
+        }
+        return mapping.get(value, "auto")

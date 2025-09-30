@@ -24,6 +24,32 @@ Session = sessionmaker(engine, expire_on_commit=False, future=True)
 Base.metadata.create_all(engine)
 
 
+def _ensure_schema_migrations() -> None:
+    """Perform lightweight, idempotent schema migrations for SQLite deployments."""
+
+    required_columns = {
+        "moulding_serial": "TEXT",
+        "contract": "TEXT",
+        "order_number": "TEXT",
+        "colour": "TEXT",
+        "notes": "TEXT",
+    }
+
+    with engine.begin() as conn:
+        existing = {
+            row[1]
+            for row in conn.exec_driver_sql("PRAGMA table_info(weigh_events)").fetchall()
+        }
+        for column, ddl in required_columns.items():
+            if column not in existing:
+                conn.exec_driver_sql(
+                    f"ALTER TABLE weigh_events ADD COLUMN {column} {ddl}"
+                )
+
+
+_ensure_schema_migrations()
+
+
 app = FastAPI(title="Weigh Station")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # --- Pydantic DTOs
@@ -39,8 +65,13 @@ class WeighEventOut(BaseModel):
     id: int
     ts: str
     variant_id: int
+    moulding_serial: Optional[str] = None
     serial: str
+    contract: Optional[str] = None
+    order_number: Optional[str] = None
     operator: Optional[str] = None
+    colour: Optional[str] = None
+    notes: Optional[str] = None
     gross_g: float
     net_g: float
     in_range: bool
@@ -154,11 +185,35 @@ async def ws_weight(ws: WebSocket):
         await ws.close()
 # --- Commit a weighing (now enforces non-blank + unique serial)
 @app.post("/api/weigh/commit", response_model=WeighEventOut)
-def commit(variant_id: int, serial: str = Query(...), operator: Optional[str] = Query(default=None)):
+def commit(
+    variant_id: int,
+    serial: str = Query(...),
+    operator: Optional[str] = Query(default=None),
+    moulding_serial: Optional[str] = Query(default=None),
+    contract: Optional[str] = Query(default=None),
+    order_number: Optional[str] = Query(default=None),
+    colour: Optional[str] = Query(default=None),
+    notes: Optional[str] = Query(default=None),
+):
     serial = (serial or "").strip()
     if not serial:
         raise HTTPException(400, "Serial cannot be blank.")
     operator_clean = (operator or "").strip() or None
+
+    def _clean(value: Optional[str], *, preserve_newlines: bool = False) -> Optional[str]:
+        if value is None:
+            return None
+        if preserve_newlines:
+            cleaned = value.strip()
+        else:
+            cleaned = value.strip()
+        return cleaned or None
+
+    moulding_clean = _clean(moulding_serial)
+    contract_clean = _clean(contract)
+    order_clean = _clean(order_number)
+    colour_clean = _clean(colour)
+    notes_clean = _clean(notes, preserve_newlines=True)
     with Session() as s:
         # Enforce global uniqueness of serial across all variants
         dup = s.query(WeighEvent).filter(WeighEvent.serial == serial).first()
@@ -174,8 +229,13 @@ def commit(variant_id: int, serial: str = Query(...), operator: Optional[str] = 
         raw_avg = int(latest.get("raw", 0))
         evt = WeighEvent(
             variant_id=variant_id,
+            moulding_serial=moulding_clean,
             serial=serial,
+            contract=contract_clean,
+            order_number=order_clean,
             operator=operator_clean,
+            colour=colour_clean,
+            notes=notes_clean,
             gross_g=g,
             net_g=net_g,
             in_range=in_range,
@@ -186,15 +246,23 @@ def commit(variant_id: int, serial: str = Query(...), operator: Optional[str] = 
             id=evt.id,
             ts=evt.ts.isoformat(),
             variant_id=evt.variant_id,
+            moulding_serial=evt.moulding_serial,
             serial=evt.serial,
+            contract=evt.contract,
+            order_number=evt.order_number,
             operator=evt.operator,
+            colour=evt.colour,
+            notes=evt.notes,
             gross_g=evt.gross_g,
             net_g=evt.net_g,
             in_range=evt.in_range,
         )
 # --- Stats (pass/fail counters, optional by variant)
 @app.get("/api/stats")
-def stats(variant_id: Optional[int] = None):
+def stats(
+    variant_id: Optional[int] = None,
+    moulding_serial: Optional[str] = Query(default=None),
+):
     today = datetime.utcnow().date()
     start_dt = datetime.combine(today, time.min)
     end_dt = start_dt + timedelta(days=1)
@@ -204,6 +272,9 @@ def stats(variant_id: Optional[int] = None):
         filters = [WeighEvent.ts >= start_dt, WeighEvent.ts < end_dt]
         if variant_id:
             filters.append(WeighEvent.variant_id == variant_id)
+        serial_filter = (moulding_serial or "").strip()
+        if serial_filter:
+            filters.append(WeighEvent.moulding_serial == serial_filter)
         row = (
             s.query(
                 pass_case.label("pass_count"),
@@ -368,7 +439,23 @@ def export_csv(
         raise HTTPException(400, '"to" must be on or after "from".')
     output = io.StringIO()
     w = csv.writer(output)
-    w.writerow(["ts", "variant_id", "serial", "operator", "gross_g", "net_g", "in_range", "raw_avg"])
+    w.writerow(
+        [
+            "ts",
+            "variant_id",
+            "moulding_serial",
+            "serial",
+            "contract",
+            "order_number",
+            "operator",
+            "colour",
+            "notes",
+            "gross_g",
+            "net_g",
+            "in_range",
+            "raw_avg",
+        ]
+    )
     with Session() as s:
         q = s.query(WeighEvent)
         if variant: q = q.filter(WeighEvent.variant_id == variant)
@@ -376,16 +463,23 @@ def export_csv(
         if start_dt: q = q.filter(WeighEvent.ts >= start_dt)
         if end_dt: q = q.filter(WeighEvent.ts <= end_dt)
         for r in q.order_by(WeighEvent.ts.asc()).all():
-            w.writerow([
-                r.ts.isoformat(),
-                r.variant_id,
-                r.serial,
-                r.operator or "",
-                r.gross_g,
-                r.net_g,
-                r.in_range,
-                r.raw_avg,
-            ])
+            w.writerow(
+                [
+                    r.ts.isoformat(),
+                    r.variant_id,
+                    r.moulding_serial or "",
+                    r.serial,
+                    r.contract or "",
+                    r.order_number or "",
+                    r.operator or "",
+                    r.colour or "",
+                    (r.notes or "").replace("\r", " ").replace("\n", " "),
+                    r.gross_g,
+                    r.net_g,
+                    r.in_range,
+                    r.raw_avg,
+                ]
+            )
     output.seek(0)
     return StreamingResponse(output, media_type="text/csv",
                              headers={"Content-Disposition": "attachment; filename=weigh_export.csv"})
@@ -440,13 +534,22 @@ def _ncdf(x: float) -> float:
     # standard normal CDF
     return 0.5 * (1.0 + erf(x / sqrt(2.0)))
 @app.get("/api/stats/summary")
-def stats_summary(variant_id: int, bins: int = 20, frm: Optional[str] = None, to: Optional[str] = None):
+def stats_summary(
+    variant_id: int,
+    bins: int = 20,
+    frm: Optional[str] = None,
+    to: Optional[str] = None,
+    moulding_serial: Optional[str] = None,
+):
     # fetch variant & measurements
     with Session() as s:
         v = s.get(Variant, variant_id)
         if not v:
             raise HTTPException(404, "Variant not found")
         q = s.query(WeighEvent).filter(WeighEvent.variant_id == variant_id)
+        serial_filter = (moulding_serial or "").strip()
+        if serial_filter:
+            q = q.filter(WeighEvent.moulding_serial == serial_filter)
         # (MVP) frm/to are placeholders; extend to parse ISO dates if needed
         rows = q.order_by(WeighEvent.ts.asc()).all()
         xs = [r.net_g for r in rows]
@@ -497,6 +600,7 @@ def stats_distribution(
     variant_id: int | None = Query(None),
     frm: str | None = Query(None),
     to: str | None = Query(None),
+    moulding_serial: str | None = Query(None),
     bins: int = Query(20, ge=5, le=200),
 ):
     # Need a single variant for Cp/Cpk (LSL/USL)
@@ -511,6 +615,9 @@ def stats_distribution(
             q = q.filter(WeighEvent.ts >= _parse_day(frm))
         if to:
             q = q.filter(WeighEvent.ts < (_parse_day(to) + timedelta(days=1)))
+        serial_filter = (moulding_serial or "").strip()
+        if serial_filter:
+            q = q.filter(WeighEvent.moulding_serial == serial_filter)
         rows = q.order_by(WeighEvent.ts.asc()).all()
         vals = [float(r.net_g) for r in rows]
         n = len(vals)

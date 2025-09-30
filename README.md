@@ -6,6 +6,7 @@ Raspberry Pi + Brecknell B140 bench station for component weighing with 4 produc
 - 4 variants (editable in **Settings**) with independent min/max.
 - Big live weight readout (0.1 g), screen background **green** in-range / **red** out-of-range.
 - USB barcode scanner (HID) for serials.
+- Capture moulding serial, final serial, contract, order number, operator, colour, and notes for every weigh.
 - Calibration (Tare + Known mass) web UI.
 - Drift minimization: median+EMA filtering with stability gating.
 - CSV export.
@@ -41,6 +42,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `SCALE_FORCE_DTR` | `true` | Force DTR high after opening the port (some adapters require this for streaming). |
 | `SCALE_FORCE_RTS` | `true` | Force RTS high after opening the port. |
 | `SCALE_NATIVE_COUNTS_PER_GRAM` | `1000` | Internal counts-per-gram factor used for weight conversion math. |
-| `SCALE_KG_TO_GRAMS` | `100` | Multiplier applied to values reported in kilograms by the B140 indicator. |
+| `SCALE_KG_TO_GRAMS` | `100` | Multiplier applied to values reported in kilograms by the B140 indicator (supports decimals for fractional scaling). |
+| `SCALE_NET_UNIT` | `auto` | Default unit when a Net line omits an explicit unit (`auto`, `kg`, `g`, `lb`, or `oz`). |
 | `SCALE_FRAME_TERMINATOR` | `\r` | Frame terminator (escape sequences like `\r\n` are supported). |
 | `SCALE_FRAME_MAX_BYTES` | `64` | Max bytes to accumulate while waiting for a terminator. |
