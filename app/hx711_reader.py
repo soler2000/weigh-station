@@ -55,6 +55,10 @@ class ScaleReader:
 
     _LINE_SPLIT_RE = re.compile(r"[,\s]+")
     _NUMBER_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
+    _NUMBER_WITH_UNIT_RE = re.compile(
+        r"([-+]?\d+(?:\.\d+)?)\s*(KG|KGS?|KILOGRAMS?|LB|LBS?|POUNDS?|OZ|OZS?|OUNCES?|G|GRAMS?)",
+        re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -295,38 +299,108 @@ class ScaleReader:
 
     def _parse_line(self, text: str) -> tuple[float, int, bool | None] | None:
         """Return (grams, raw_counts, stable_hint) if line parsed; else None."""
-        tokens = [tok.strip().upper() for tok in self._LINE_SPLIT_RE.split(text) if tok.strip()]
+        tokens = [tok.strip() for tok in self._LINE_SPLIT_RE.split(text) if tok.strip()]
         if not tokens:
             return None
 
+        upper_tokens = [tok.upper() for tok in tokens]
+
         stable_hint: bool | None = None
-        for tok in tokens:
+        for tok in upper_tokens:
             if tok in {"US", "UN", "UNSTABLE"}:
                 stable_hint = False
                 break
             if tok in {"ST", "STABLE"}:
                 stable_hint = True
 
-        match = self._NUMBER_RE.search(text.replace(" ", ""))
-        if not match:
+        grams = self._extract_grams(text, tokens)
+        if grams is None:
             return None
-        try:
-            value = float(match.group())
-        except ValueError:
-            return None
-
-        lower = text.lower()
-        if "kg" in lower:
-            grams = value * 1000.0
-        elif "lb" in lower:
-            grams = value * 453.59237
-        elif "oz" in lower:
-            grams = value * 28.349523125
-        else:
-            grams = value
 
         raw_counts = int(round(grams * self.native_counts_per_gram))
         return grams, raw_counts, stable_hint
+
+    def _extract_grams(self, text: str, tokens: list[str]) -> float | None:
+        """Attempt to extract a numeric weight in grams from the raw text."""
+
+        def _apply_unit(value: float, unit: str) -> float:
+            unit = unit.lower()
+            if unit.startswith("kg") or "kilogram" in unit:
+                return value * 1000.0
+            if unit.startswith("lb") or "pound" in unit:
+                return value * 453.59237
+            if unit.startswith("oz") or "ounce" in unit:
+                return value * 28.349523125
+            return value
+
+        # 1) Prefer explicit number+unit pair anywhere in the text.
+        match = self._NUMBER_WITH_UNIT_RE.search(text)
+        if match:
+            try:
+                value = float(match.group(1))
+                unit = match.group(2)
+            except (TypeError, ValueError):
+                pass
+            else:
+                return _apply_unit(value, unit)
+
+        # 2) Look for tokens that embed units (e.g. "1.23Kg", "2lb").
+        for token in tokens:
+            lower = token.lower()
+            for unit in ("kg", "kilogram", "lb", "pound", "oz", "ounce", "g", "gram"):
+                idx = lower.find(unit)
+                if idx == -1:
+                    continue
+                number_part = token[:idx] if idx > 0 else token[idx + len(unit) :]
+                match = self._NUMBER_RE.search(number_part)
+                if not match and idx > 0:
+                    continue
+                if not match and idx == 0:
+                    match = self._NUMBER_RE.search(token[idx + len(unit) :])
+                if not match:
+                    continue
+                try:
+                    value = float(match.group())
+                except ValueError:
+                    continue
+                return _apply_unit(value, unit)
+
+        # 3) If the unit is in its own token, use neighbouring numeric token.
+        upper_tokens = [tok.upper() for tok in tokens]
+        for idx, tok in enumerate(upper_tokens):
+            if tok not in {"KG", "KGS", "KILOGRAM", "KILOGRAMS", "LB", "LBS", "POUND", "POUNDS", "OZ", "OZS", "OUNCE", "OUNCES", "G", "GRAM", "GRAMS"}:
+                continue
+            unit_token = tokens[idx]
+            neighbours = []
+            if idx > 0:
+                neighbours.append(tokens[idx - 1])
+            if idx + 1 < len(tokens):
+                neighbours.append(tokens[idx + 1])
+            for neighbour in neighbours:
+                match = self._NUMBER_RE.search(neighbour)
+                if not match:
+                    continue
+                try:
+                    value = float(match.group())
+                except ValueError:
+                    continue
+                return _apply_unit(value, unit_token)
+
+        # 4) Fall back to the first reasonable numeric token.
+        for token in tokens:
+            match = self._NUMBER_RE.search(token)
+            if not match:
+                continue
+            try:
+                value = float(match.group())
+            except ValueError:
+                continue
+            # Skip obviously non-weight numbers (timestamps etc.).
+            if abs(value) > 1e6:
+                continue
+            return value
+
+        return None
 
     def _update(self, raw_counts: int, stable_hint: bool | None) -> None:
         with self._state_lock:
