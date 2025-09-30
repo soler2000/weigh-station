@@ -40,6 +40,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `SCALE_DSRDTR` | `false` | Enable DSR/DTR hardware flow control. |
 | `SCALE_FORCE_DTR` | `true` | Force DTR high after opening the port (some adapters require this for streaming). |
 | `SCALE_FORCE_RTS` | `true` | Force RTS high after opening the port. |
-| `SCALE_NATIVE_COUNTS_PER_GRAM` | `1000` | Internal counts-per-gram factor used for calibration math. |
+| `SCALE_NATIVE_COUNTS_PER_GRAM` | `1000` | Internal counts-per-gram factor used for weight conversion math. |
+| `SCALE_KG_TO_GRAMS` | `100` | Multiplier applied to values reported in kilograms by the B140 indicator. |
 | `SCALE_FRAME_TERMINATOR` | `\r` | Frame terminator (escape sequences like `\r\n` are supported). |
 | `SCALE_FRAME_MAX_BYTES` | `64` | Max bytes to accumulate while waiting for a terminator. |

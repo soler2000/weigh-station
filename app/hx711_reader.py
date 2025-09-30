@@ -85,6 +85,7 @@ class ScaleReader:
         self.native_counts_per_gram = (
             native_counts_per_gram or _env_float("SCALE_NATIVE_COUNTS_PER_GRAM", 1000.0)
         )
+        self.kg_to_grams = max(1.0, _env_float("SCALE_KG_TO_GRAMS", 100.0))
 
         self.bytesize = self._coerce_bytesize(os.getenv("SCALE_BYTESIZE"))
         self.parity = self._coerce_parity(os.getenv("SCALE_PARITY"))
@@ -332,10 +333,12 @@ class ScaleReader:
     def _extract_grams(self, text: str, tokens: list[str]) -> float | None:
         """Attempt to extract a numeric weight in grams from the raw text."""
 
+        kg_factor = self.kg_to_grams
+
         def _apply_unit(value: float, unit: str) -> float:
             unit = unit.lower()
             if unit.startswith("kg") or "kilogram" in unit:
-                return value * 1000.0
+                return value * kg_factor
             if unit.startswith("lb") or "pound" in unit:
                 return value * 453.59237
             if unit.startswith("oz") or "ounce" in unit:

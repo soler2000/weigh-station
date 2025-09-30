@@ -29,7 +29,10 @@
 <body class="app dark">
   <!-- same “chrome” as the other pages -->
   <header class="card topbar">
-    <div class="brand" style="font-weight:700">Weigh Station</div>
+    <div class="brand">
+      <img src="/static/gentex-logo.svg" alt="Gentex Corporation" class="brand-logo">
+      <span class="brand-title">Weigh Station</span>
+    </div>
     <nav class="nav">
       <a href="/" class="active">Home</a>
       <a href="/settings">Settings</a>
@@ -64,8 +67,6 @@
         <div class="actions">
           <button id="saveBtn">Save</button>
         </div>
-
-        <p class="muted" style="margin-top:8px">Use the Settings page in the top navigation for tare and calibration controls.</p>
 
         <div class="muted" style="margin-top:16px;margin-bottom:4px;font-size:0.95rem">Totals for today</div>
         <div class="kpis">
@@ -111,7 +112,8 @@ async function loadVariants(){
 
 function updateScreen(d){
   $('reading').textContent = fmtG(d.g);
-  $('readingSub').textContent = `RAW ${d.raw ?? '–'} • ${new Date().toLocaleTimeString()}`;
+  const status = (d.stable === true) ? 'Stable' : (d.stable === false ? 'Unstable' : 'Measuring');
+  $('readingSub').textContent = `${status} • ${new Date().toLocaleTimeString()}`;
   if(currentVariant){
     const ok = (d.g >= currentVariant.min_g && d.g <= currentVariant.max_g);
     tint(ok);
