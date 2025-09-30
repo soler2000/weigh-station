@@ -61,7 +61,7 @@ class ScaleReader:
         re.IGNORECASE,
     )
     _NET_VALUE_RE = re.compile(
-        rf"\bNET(?:\s+WEIGHT)?\b[:=\s]*({_NUMBER_PATTERN})(?:\s*(KG|KGS?|KILOGRAMS?|LB|LBS?|POUNDS?|OZ|OZS?|OUNCES?|G|GRAMS?))?",
+        rf"\bNETT?(?:\s*(?:WEIGHT|WT\.?))?\b[:=\s]*({_NUMBER_PATTERN})(?:\s*(KG|KGS?|KILOGRAMS?|LB|LBS?|POUNDS?|OZ|OZS?|OUNCES?|G|GRAMS?))?",
         re.IGNORECASE,
     )
     _VERBOSE_FIELD_RE = re.compile(
@@ -462,7 +462,13 @@ class ScaleReader:
             # Skip obviously non-weight numbers (timestamps etc.).
             if abs(value) > 1e6:
                 continue
-            return value * default_multiplier
+            multiplier = default_multiplier
+            if self.net_default_unit == "auto" and default_multiplier == kg_factor:
+                if abs(value) >= 10:
+                    multiplier = 1.0
+                else:
+                    multiplier = kg_factor
+            return value * multiplier
 
         return None
 

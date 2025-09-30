@@ -15,10 +15,7 @@
 
     .reading-card{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:40vh}
     .reading{font-weight:800;font-size:clamp(56px,12vw,144px);line-height:1;letter-spacing:-.02em}
-    .reading-sub{opacity:.85;margin-top:6px;transition:color .2s ease}
-    .reading-sub.is-stable{color:#23ad4e}
-    .reading-sub.is-unstable{color:#d63939}
-    .reading-sub.is-measuring{color:#c28d1a}
+    .reading-sub{opacity:.85;margin-top:6px;color:#cbd5f5}
     .status--pass{ background: rgba(35,173,78,.08) }  /* soft green tint */
     .status--fail{ background: rgba(214,57,57,.08) } /* soft red tint  */
 
@@ -52,7 +49,7 @@
       <!-- Left: live reading -->
       <section class="card reading-card" id="readingCard">
         <div id="reading" class="reading">0.0 g</div>
-        <div id="readingSub" class="reading-sub is-measuring">Waiting for scale…</div>
+        <div id="readingSub" class="reading-sub">Waiting for scale…</div>
       </section>
 
       <!-- Right: controls -->
@@ -60,9 +57,6 @@
         <div class="formgrid">
           <label for="mouldingSerial">Moulding Serial</label>
           <input id="mouldingSerial" type="text" placeholder="Enter moulding serial">
-
-          <label for="finalSerial">Final Serial</label>
-          <input id="finalSerial" type="text" placeholder="Scan or enter final serial" autocomplete="off">
 
           <label for="variant">Variant</label>
           <select id="variant"></select>
@@ -78,6 +72,9 @@
 
           <label for="colour">Colour</label>
           <input id="colour" type="text" placeholder="Colour">
+
+          <label for="finalSerial">Final Serial</label>
+          <input id="finalSerial" type="text" placeholder="Scan or enter final serial" autocomplete="off">
 
           <label for="notes">Notes</label>
           <textarea id="notes" placeholder="Notes for this weigh"></textarea>
@@ -102,7 +99,11 @@
 <script>
 const $ = (id)=>document.getElementById(id);
 let currentVariant = null;
+let latestReading = {g: 0};
+let requireZeroReset = false;
+let zeroPromptActive = false;
 
+const ZERO_TOLERANCE_G = 0.5;
 const STICKY_FIELDS = ['mouldingSerial','contract','orderNumber','operator','colour'];
 const STICKY_STORAGE_KEY = 'weighStationStickyFields';
 const STICKY_TTL_MS = 30 * 60 * 1000;
@@ -135,20 +136,20 @@ async function loadVariants(){
 }
 
 function updateScreen(d){
+  if(!d || typeof d.g !== 'number') return;
+  latestReading = d;
   $('reading').textContent = fmtG(d.g);
   const sub = $('readingSub');
-  let status = 'Measuring';
-  let statusClass = 'is-measuring';
-  if(d.stable === true){
-    status = 'Stable';
-    statusClass = 'is-stable';
-  }else if(d.stable === false){
-    status = 'Unstable';
-    statusClass = 'is-unstable';
+  if(sub){
+    sub.textContent = `Last update • ${new Date().toLocaleTimeString()}`;
   }
-  sub.textContent = `${status} • ${new Date().toLocaleTimeString()}`;
-  sub.classList.remove('is-stable','is-unstable','is-measuring');
-  sub.classList.add(statusClass);
+  if(requireZeroReset && Math.abs(d.g) <= ZERO_TOLERANCE_G){
+    requireZeroReset = false;
+    if(zeroPromptActive){
+      setMsg('Scale back to zero – ready for next part.');
+      zeroPromptActive = false;
+    }
+  }
   if(currentVariant){
     const ok = (d.g >= currentVariant.min_g && d.g <= currentVariant.max_g);
     tint(ok);
@@ -253,6 +254,12 @@ async function doSave(){
     const serial = (finalSerialEl?.value || '').trim();
     if(!serial){ setMsg('Final serial cannot be blank', false); finalSerialEl?.focus(); return; }
 
+    if(requireZeroReset && Math.abs(latestReading?.g ?? 0) > ZERO_TOLERANCE_G){
+      zeroPromptActive = true;
+      setMsg('Remove product and allow the scale to return to zero before saving.', false);
+      return;
+    }
+
     const params = new URLSearchParams();
     params.set('variant_id', String(currentVariant.id));
     params.set('serial', serial);
@@ -266,8 +273,12 @@ async function doSave(){
     const res = await fetch(`/api/weigh/commit?${params.toString()}`, {method:'POST'});
     if(res.status===409){ setMsg('Final serial already used', false); return; }
     if(!res.ok){ setMsg('Save failed', false); return; }
-    setMsg('Saved');
+    setMsg('Saved – remove product and return the scale to zero.');
+    zeroPromptActive = true;
+    requireZeroReset = true;
     if(finalSerialEl) finalSerialEl.value='';
+    const notesEl = $('notes');
+    if(notesEl) notesEl.value='';
     persistStickyFields();
     refreshStats();
     finalSerialEl?.focus();
