@@ -85,7 +85,7 @@ class ScaleReader:
         self.native_counts_per_gram = (
             native_counts_per_gram or _env_float("SCALE_NATIVE_COUNTS_PER_GRAM", 1000.0)
         )
-        kg_factor = _env_float("SCALE_KG_TO_GRAMS", 100.0)
+        kg_factor = _env_float("SCALE_KG_TO_GRAMS", 1000.0)
         self.kg_to_grams = kg_factor if kg_factor > 0 else 100.0
         self.net_default_unit = self._coerce_net_unit(os.getenv("SCALE_NET_UNIT", "auto"))
 

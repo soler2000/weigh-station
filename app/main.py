@@ -79,10 +79,20 @@ class WeighEventOut(BaseModel):
 reader = ScaleReader()  # pin names via env: DATA_PIN, CLOCK_PIN
 with Session() as s:
     calib = s.execute(select(Calibration).order_by(Calibration.id.desc())).scalar()
+    native_scale = reader.native_counts_per_gram
     if calib:
-        reader.set_calibration(calib.zero_offset, calib.scale_factor)
+        stored_scale = float(calib.scale_factor or 0)
+        stored_zero = int(calib.zero_offset or 0)
+        if stored_scale <= 0:
+            reader.set_calibration(0, native_scale)
+        else:
+            ratio = stored_scale / native_scale if native_scale else 1.0
+            if 0.5 <= ratio <= 2.0:
+                reader.set_calibration(stored_zero, stored_scale)
+            else:
+                reader.set_calibration(0, native_scale)
     else:
-        reader.set_calibration(0, 1.0)
+        reader.set_calibration(0, native_scale)
 reader.start(hz=10)
 # --- Seed 4 variants if empty (placeholders; adjust in UI)
 with Session() as s:
