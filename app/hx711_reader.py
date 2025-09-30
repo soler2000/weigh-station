@@ -11,6 +11,18 @@ from typing import Any
 import serial
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return bool(default)
+    value = value.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, default))
@@ -56,9 +68,26 @@ class ScaleReader:
     ) -> None:
         self.serial_port = serial_port or os.getenv("SCALE_PORT", "/dev/ttyUSB0")
         self.baudrate = baudrate or _env_int("SCALE_BAUD", 9600)
+        self.timeout = _env_float("SCALE_TIMEOUT", 0.5)
         self.native_counts_per_gram = (
             native_counts_per_gram or _env_float("SCALE_NATIVE_COUNTS_PER_GRAM", 1000.0)
         )
+
+        self.bytesize = self._coerce_bytesize(os.getenv("SCALE_BYTESIZE"))
+        self.parity = self._coerce_parity(os.getenv("SCALE_PARITY"))
+        self.stopbits = self._coerce_stopbits(os.getenv("SCALE_STOPBITS"))
+        self.xonxoff = _env_bool("SCALE_XONXOFF", False)
+        self.rtscts = _env_bool("SCALE_RTSCTS", False)
+        self.dsrdtr = _env_bool("SCALE_DSRDTR", False)
+        self.set_dtr = _env_bool("SCALE_FORCE_DTR", True)
+        self.set_rts = _env_bool("SCALE_FORCE_RTS", True)
+
+        self.frame_terminator = self._coerce_terminator(
+            os.getenv("SCALE_FRAME_TERMINATOR", "\\r"),
+        )
+        self.frame_max_bytes = _env_int("SCALE_FRAME_MAX_BYTES", 64)
+        if self.frame_max_bytes <= 0:
+            self.frame_max_bytes = 64
 
         self.alpha = alpha
         self.window = deque(maxlen=window)
@@ -79,6 +108,7 @@ class ScaleReader:
         self._last_raw_counts: int | None = None
         self._last_update_ts: float = 0.0
         self._raw_log: deque[dict[str, Any]] = deque(maxlen=2000)
+        self._last_data_ts: float | None = None
 
     # ------------------------------------------------------------------
     # Calibration helpers (maintain HX711-compatible API)
@@ -160,15 +190,21 @@ class ScaleReader:
 
             backoff = 1.0
             try:
-                line = self._serial.readline()
+                line = self._serial.read_until(
+                    expected=self.frame_terminator,
+                    size=self.frame_max_bytes,
+                )
                 if not line:
+                    self._emit_idle_event()
                     continue
                 try:
                     text = line.decode("ascii", errors="ignore").strip()
                 except Exception:
                     continue
                 if not text:
+                    self._emit_idle_event()
                     continue
+                self._note_data_received()
                 log_entry: dict[str, Any] = {"ts": time.time(), "raw": text}
                 parsed = self._parse_line(text)
                 if parsed is None:
@@ -200,9 +236,25 @@ class ScaleReader:
                 self._serial = serial.Serial(
                     self.serial_port,
                     baudrate=self.baudrate,
-                    timeout=0.5,
+                    timeout=self.timeout,
+                    bytesize=self.bytesize,
+                    parity=self.parity,
+                    stopbits=self.stopbits,
+                    xonxoff=self.xonxoff,
+                    rtscts=self.rtscts,
+                    dsrdtr=self.dsrdtr,
                 )
                 self._serial.reset_input_buffer()
+                if self.set_dtr:
+                    try:
+                        self._serial.dtr = True
+                    except Exception:
+                        pass
+                if self.set_rts:
+                    try:
+                        self._serial.rts = True
+                    except Exception:
+                        pass
                 self._append_log(
                     {
                         "event": f"Opened {self.serial_port} @ {self.baudrate} baud",
@@ -226,6 +278,21 @@ class ScaleReader:
             self._append_log({"event": "Serial connection closed", "ts": time.time()})
 
     # ------------------------------------------------------------------
+    def _emit_idle_event(self) -> None:
+        now = time.time()
+        if self._last_data_ts is None:
+            self._last_data_ts = now
+            return
+        if (now - self._last_data_ts) < max(self.timeout, 0.5):
+            return
+        self._append_log(
+            {
+                "event": f"No serial data for {now - self._last_data_ts:.1f}s",
+                "ts": now,
+            }
+        )
+        self._last_data_ts = now
+
     def _parse_line(self, text: str) -> tuple[float, int, bool | None] | None:
         """Return (grams, raw_counts, stable_hint) if line parsed; else None."""
         tokens = [tok.strip().upper() for tok in self._LINE_SPLIT_RE.split(text) if tok.strip()]
@@ -287,9 +354,69 @@ class ScaleReader:
             self.latest = dict(g=g_display, stable=stable, raw=int(raw_counts))
             self._last_raw_counts = int(raw_counts)
             self._last_update_ts = time.time()
+            self._last_data_ts = self._last_update_ts
 
     def _append_log(self, entry: dict[str, Any]) -> None:
         item = dict(entry)
         item.setdefault("ts", time.time())
         with self._state_lock:
             self._raw_log.append(item)
+
+    # ------------------------------------------------------------------
+    def _note_data_received(self) -> None:
+        now = time.time()
+        with self._state_lock:
+            self._last_data_ts = now
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _coerce_bytesize(value: str | None) -> int:
+        if not value:
+            return serial.EIGHTBITS
+        value = value.strip()
+        mapping = {
+            "5": serial.FIVEBITS,
+            "6": serial.SIXBITS,
+            "7": serial.SEVENBITS,
+            "8": serial.EIGHTBITS,
+        }
+        return mapping.get(value, serial.EIGHTBITS)
+
+    @staticmethod
+    def _coerce_parity(value: str | None) -> str:
+        if not value:
+            return serial.PARITY_NONE
+        value = value.strip().lower()
+        mapping = {
+            "n": serial.PARITY_NONE,
+            "none": serial.PARITY_NONE,
+            "e": serial.PARITY_EVEN,
+            "even": serial.PARITY_EVEN,
+            "o": serial.PARITY_ODD,
+            "odd": serial.PARITY_ODD,
+            "m": serial.PARITY_MARK,
+            "mark": serial.PARITY_MARK,
+            "s": serial.PARITY_SPACE,
+            "space": serial.PARITY_SPACE,
+        }
+        return mapping.get(value, serial.PARITY_NONE)
+
+    @staticmethod
+    def _coerce_stopbits(value: str | None) -> float:
+        if not value:
+            return serial.STOPBITS_ONE
+        value = value.strip().lower()
+        mapping = {
+            "1": serial.STOPBITS_ONE,
+            "1.5": serial.STOPBITS_ONE_POINT_FIVE,
+            "1.5bits": serial.STOPBITS_ONE_POINT_FIVE,
+            "2": serial.STOPBITS_TWO,
+        }
+        return mapping.get(value, serial.STOPBITS_ONE)
+
+    @staticmethod
+    def _coerce_terminator(value: str) -> bytes:
+        decoded = value.encode("utf-8", errors="ignore").decode("unicode_escape")
+        if not decoded:
+            decoded = "\r"
+        return decoded.encode("utf-8", errors="ignore")

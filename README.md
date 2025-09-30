@@ -31,4 +31,15 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | --- | --- | --- |
 | `SCALE_PORT` | `/dev/ttyUSB0` | Serial device for the B140 indicator. |
 | `SCALE_BAUD` | `9600` | Serial baud rate. |
+| `SCALE_TIMEOUT` | `0.5` | Read timeout in seconds before the reader logs a lack-of-data event. |
+| `SCALE_BYTESIZE` | `8` | Data bits (`5`–`8`). |
+| `SCALE_PARITY` | `none` | Parity (`none`, `even`, `odd`, `mark`, `space`). |
+| `SCALE_STOPBITS` | `1` | Stop bits (`1`, `1.5`, `2`). |
+| `SCALE_XONXOFF` | `false` | Enable software flow control. |
+| `SCALE_RTSCTS` | `false` | Enable RTS/CTS hardware flow control. |
+| `SCALE_DSRDTR` | `false` | Enable DSR/DTR hardware flow control. |
+| `SCALE_FORCE_DTR` | `true` | Force DTR high after opening the port (some adapters require this for streaming). |
+| `SCALE_FORCE_RTS` | `true` | Force RTS high after opening the port. |
 | `SCALE_NATIVE_COUNTS_PER_GRAM` | `1000` | Internal counts-per-gram factor used for calibration math. |
+| `SCALE_FRAME_TERMINATOR` | `\r` | Frame terminator (escape sequences like `\r\n` are supported). |
+| `SCALE_FRAME_MAX_BYTES` | `64` | Max bytes to accumulate while waiting for a terminator. |
