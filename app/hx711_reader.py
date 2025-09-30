@@ -54,9 +54,18 @@ class ScaleReader:
     """
 
     _LINE_SPLIT_RE = re.compile(r"[,\s]+")
-    _NUMBER_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
+    _NUMBER_PATTERN = r"[-+]?(?:\d+(?:\.\d+)?|\.\d+)"
+    _NUMBER_RE = re.compile(_NUMBER_PATTERN)
     _NUMBER_WITH_UNIT_RE = re.compile(
-        r"([-+]?\d+(?:\.\d+)?)\s*(KG|KGS?|KILOGRAMS?|LB|LBS?|POUNDS?|OZ|OZS?|OUNCES?|G|GRAMS?)",
+        rf"({_NUMBER_PATTERN})\s*(KG|KGS?|KILOGRAMS?|LB|LBS?|POUNDS?|OZ|OZS?|OUNCES?|G|GRAMS?)",
+        re.IGNORECASE,
+    )
+    _NET_VALUE_RE = re.compile(
+        rf"\bNET(?:\s+WEIGHT)?\b[:=\s]*({_NUMBER_PATTERN})(?:\s*(KG|KGS?|KILOGRAMS?|LB|LBS?|POUNDS?|OZ|OZS?|OUNCES?|G|GRAMS?))?",
+        re.IGNORECASE,
+    )
+    _VERBOSE_FIELD_RE = re.compile(
+        r"\b(DATE|TIME|GROSS|TARE|MERCHANDISE|PIECE|TOTAL|COUNT|ITEM)\b",
         re.IGNORECASE,
     )
 
@@ -332,6 +341,25 @@ class ScaleReader:
             if unit.startswith("oz") or "ounce" in unit:
                 return value * 28.349523125
             return value
+
+        # 0) If this is a "Net" line from the verbose printout, only use that value.
+        net_match = self._NET_VALUE_RE.search(text)
+        if net_match:
+            try:
+                value = float(net_match.group(1))
+            except (TypeError, ValueError):
+                pass
+            else:
+                unit = net_match.group(2)
+                if unit:
+                    return _apply_unit(value, unit)
+                # Default verbose printouts are configured in kilograms; fall back to kg.
+                return _apply_unit(value, "kg")
+
+        # If the frame includes other verbose ticket fields (Gross, Tare, etc.) but no
+        # usable Net value, ignore it so we do not treat those as live weights.
+        if self._VERBOSE_FIELD_RE.search(text):
+            return None
 
         # 1) Prefer explicit number+unit pair anywhere in the text.
         match = self._NUMBER_WITH_UNIT_RE.search(text)
