@@ -4,7 +4,9 @@ import re
 import threading
 import time
 from collections import deque
+from datetime import datetime
 from statistics import median, pstdev
+from typing import Any
 
 import serial
 
@@ -76,6 +78,7 @@ class ScaleReader:
 
         self._last_raw_counts: int | None = None
         self._last_update_ts: float = 0.0
+        self._raw_log: deque[dict[str, Any]] = deque(maxlen=2000)
 
     # ------------------------------------------------------------------
     # Calibration helpers (maintain HX711-compatible API)
@@ -123,6 +126,29 @@ class ScaleReader:
             raise ADCNotReadyError("Scale did not provide fresh data")
         return int(raw)
 
+    def get_serial_log(self, limit: int = 200) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), self._raw_log.maxlen or 2000))
+        with self._state_lock:
+            items = list(self._raw_log)[-limit:]
+        result: list[dict[str, Any]] = []
+        for item in items:
+            ts = float(item.get("ts", 0.0) or 0.0)
+            ts_iso = None
+            if ts:
+                ts_iso = datetime.fromtimestamp(ts).isoformat(timespec="milliseconds")
+            result.append(
+                dict(
+                    ts=ts_iso,
+                    raw=str(item.get("raw", "")),
+                    parsed=bool(item.get("parsed", False)),
+                    grams=item.get("grams"),
+                    raw_counts=item.get("raw_counts"),
+                    stable_hint=item.get("stable_hint"),
+                    event=item.get("event"),
+                )
+            )
+        return result
+
     # ------------------------------------------------------------------
     def _loop(self) -> None:
         backoff = 1.0
@@ -143,17 +169,27 @@ class ScaleReader:
                     continue
                 if not text:
                     continue
+                log_entry: dict[str, Any] = {"ts": time.time(), "raw": text}
                 parsed = self._parse_line(text)
                 if parsed is None:
-                    continue
-                _, raw_counts, stable_hint = parsed
-                self._update(raw_counts, stable_hint)
-            except serial.SerialException:
+                    log_entry["parsed"] = False
+                else:
+                    grams, raw_counts, stable_hint = parsed
+                    log_entry.update(
+                        parsed=True,
+                        grams=grams,
+                        raw_counts=raw_counts,
+                        stable_hint=stable_hint,
+                    )
+                    self._update(raw_counts, stable_hint)
+                self._append_log(log_entry)
+            except serial.SerialException as exc:
+                self._append_log({"event": f"Serial exception: {exc}", "ts": time.time()})
                 self._reset_serial()
                 time.sleep(backoff)
                 backoff = min(backoff * 2.0, 10.0)
-            except Exception:
-                # Skip malformed frames, but keep running.
+            except Exception as exc:
+                self._append_log({"event": f"Parse error: {exc}", "ts": time.time()})
                 continue
 
     def _ensure_serial(self) -> bool:
@@ -167,9 +203,16 @@ class ScaleReader:
                     timeout=0.5,
                 )
                 self._serial.reset_input_buffer()
+                self._append_log(
+                    {
+                        "event": f"Opened {self.serial_port} @ {self.baudrate} baud",
+                        "ts": time.time(),
+                    }
+                )
                 return True
-            except serial.SerialException:
+            except serial.SerialException as exc:
                 self._serial = None
+                self._append_log({"event": f"Serial open failed: {exc}", "ts": time.time()})
                 return False
 
     def _reset_serial(self) -> None:
@@ -180,6 +223,7 @@ class ScaleReader:
                 except Exception:
                     pass
             self._serial = None
+            self._append_log({"event": "Serial connection closed", "ts": time.time()})
 
     # ------------------------------------------------------------------
     def _parse_line(self, text: str) -> tuple[float, int, bool | None] | None:
@@ -243,3 +287,9 @@ class ScaleReader:
             self.latest = dict(g=g_display, stable=stable, raw=int(raw_counts))
             self._last_raw_counts = int(raw_counts)
             self._last_update_ts = time.time()
+
+    def _append_log(self, entry: dict[str, Any]) -> None:
+        item = dict(entry)
+        item.setdefault("ts", time.time())
+        with self._state_lock:
+            self._raw_log.append(item)

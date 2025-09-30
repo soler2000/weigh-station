@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Serial Log • Weigh Station</title>
+  <link rel="stylesheet" href="/static/styles.css?v=app-theme-1">
+  <style>
+    .log-table tbody tr.new {
+      background: rgba(125, 211, 252, 0.08);
+    }
+    .log-table td.raw-text {
+      font-family: "JetBrains Mono", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .log-table td.small {
+      font-size: 0.82rem;
+      color: var(--app-fg-muted);
+    }
+    .log-controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+    }
+    .log-controls label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body class="app dark">
+  <header class="card topbar">
+    <div class="brand">Weigh Station</div>
+    <nav class="nav">
+      <a href="/">Home</a>
+      <a href="/settings">Settings</a>
+      <a href="/production">Production</a>
+      <a href="/stats">Stats</a>
+      <a href="/export">Export</a>
+      <a href="/serial-log" class="active">Serial Log</a>
+    </nav>
+  </header>
+
+  <main class="page">
+    <div class="stack">
+      <section class="card">
+        <h1>Serial Log</h1>
+        <p class="muted">Live view of raw frames received from the Brecknell B140 scale over RS-232. Use this for troubleshooting when no weight updates appear.</p>
+      </section>
+
+      <section class="card">
+        <div class="row between" style="margin-bottom:16px; gap:14px; align-items:flex-end;">
+          <div class="log-controls">
+            <label for="limit">Show last
+              <select id="limit">
+                <option value="50">50</option>
+                <option value="100" selected>100</option>
+                <option value="200">200</option>
+                <option value="500">500</option>
+              </select>
+              frames
+            </label>
+            <label><input type="checkbox" id="auto" checked> Auto-refresh</label>
+            <button id="refresh" class="secondary">Refresh now</button>
+          </div>
+          <div id="status" class="muted" style="font-size:0.85rem;">Waiting for data…</div>
+        </div>
+        <div class="card" style="padding:0; overflow:auto; max-height:420px;">
+          <table class="log-table">
+            <thead>
+              <tr><th style="width:160px;">Timestamp</th><th>Raw frame</th><th style="width:120px;">Parsed g</th><th style="width:120px;">Raw counts</th><th style="width:110px;">Stable hint</th><th style="width:180px;">Event</th></tr>
+            </thead>
+            <tbody id="log-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script src="/static/serial-log.js?v=1"></script>
+</body>
+</html>

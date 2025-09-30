@@ -9,6 +9,7 @@ Raspberry Pi + Brecknell B140 bench station for component weighing with 4 produc
 - Calibration (Tare + Known mass) web UI.
 - Drift minimization: median+EMA filtering with stability gating.
 - CSV export.
+- Serial log page for live RS-232 frame debugging when troubleshooting scale connectivity.
 
 ## Hardware
 - Brecknell Model B140 indicator connected over RS-232 (USB-to-serial adapter on the Pi).

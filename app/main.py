@@ -78,6 +78,11 @@ def production_output_page():
 @app.get("/export", response_class=HTMLResponse)
 def export_page():
     return (STATIC_DIR / "export.html").read_text(encoding="utf-8")
+
+
+@app.get("/serial-log", response_class=HTMLResponse)
+def serial_log_page():
+    return (STATIC_DIR / "serial-log.html").read_text(encoding="utf-8")
 # --- Variant CRUD
 @app.get("/api/variants", response_model=List[VariantOut])
 def list_variants():
@@ -388,6 +393,11 @@ def export_csv(
 @app.get("/api/debug/latest")
 def debug_latest():
     return reader.read_latest()
+
+
+@app.get("/api/scale/serial-log")
+def api_serial_log(limit: int = Query(200, ge=1, le=2000)):
+    return {"lines": reader.get_serial_log(limit=limit)}
 # --- Health
 @app.get("/api/health")
 def health():
