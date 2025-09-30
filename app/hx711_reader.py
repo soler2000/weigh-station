@@ -223,14 +223,14 @@ class ScaleReader:
                 if parsed is None:
                     log_entry["parsed"] = False
                 else:
-                    grams, raw_counts, stable_hint = parsed
+                    _grams, raw_counts, stable_hint = parsed
+                    display_g = self._update(raw_counts, stable_hint)
                     log_entry.update(
                         parsed=True,
-                        grams=grams,
+                        grams=display_g,
                         raw_counts=raw_counts,
                         stable_hint=stable_hint,
                     )
-                    self._update(raw_counts, stable_hint)
                 self._append_log(log_entry)
             except serial.SerialException as exc:
                 self._append_log({"event": f"Serial exception: {exc}", "ts": time.time()})
@@ -430,7 +430,7 @@ class ScaleReader:
 
         return None
 
-    def _update(self, raw_counts: int, stable_hint: bool | None) -> None:
+    def _update(self, raw_counts: int, stable_hint: bool | None) -> float:
         with self._state_lock:
             zero_offset = self._zero_offset
             scale_factor = self._scale_factor
@@ -448,15 +448,16 @@ class ScaleReader:
         )
         stable = stable_hint if stable_hint is not None else computed_stable
 
-        value_for_display = self.ema if self.ema is not None else grams
         precision = self.display_precision if self.display_precision > 0 else 0.1
-        g_display = round(round(value_for_display / precision) * precision, 3)
+        g_display = round(round(grams / precision) * precision, 3)
 
         with self._state_lock:
             self.latest = dict(g=g_display, stable=stable, raw=int(raw_counts))
             self._last_raw_counts = int(raw_counts)
             self._last_update_ts = time.time()
             self._last_data_ts = self._last_update_ts
+
+        return g_display
 
     def _append_log(self, entry: dict[str, Any]) -> None:
         item = dict(entry)
