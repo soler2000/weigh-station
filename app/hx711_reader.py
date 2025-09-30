@@ -1,200 +1,89 @@
-# app/hx711_reader.py
-import os, threading, time
+"""Scale reader for Brecknell B140 over RS-232."""
+import os
+import re
+import threading
+import time
 from collections import deque
 from statistics import median, pstdev
 
-import board, digitalio
+import serial
 
-# NOTE: Temp compensation skipped for MVP. TODO: add DS18B20 support later if needed.
 
-def _get_pin(name: str):
-    """Accepts 'D17','GPIO17' etc, returns board pin object."""
-    name = (name or "").upper()
-    if hasattr(board, name):
-        return getattr(board, name)
-    if name.startswith("GPIO") and hasattr(board, "D"+name[4:]):
-        return getattr(board, "D"+name[4:])
-    raise ValueError(f"Unknown pin name: {name}")
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return int(default)
+
 
 class ADCNotReadyError(RuntimeError):
-    """Raised when the HX711 ADC does not present data within the retry window."""
+    """Raised when the serial scale does not provide fresh data in time."""
 
-
-class _HX711BitBang:
-    """
-    Minimal, robust HX711 reader (Channel A @ Gain 128).
-    Uses digitalio directly; no external HX711 libs.
-    """
-    def __init__(self, data_pin_name: str, clock_pin_name: str):
-        dp = digitalio.DigitalInOut(_get_pin(data_pin_name))
-        cp = digitalio.DigitalInOut(_get_pin(clock_pin_name))
-        dp.direction = digitalio.Direction.INPUT
-        cp.direction = digitalio.Direction.OUTPUT
-        cp.value = False  # idle low
-        self.dp, self.cp = dp, cp
-
-    def _ready(self, timeout: float = 1.0) -> bool:
-        t0 = time.time()
-        # DOUT goes LOW when ready
-        while time.time() - t0 < timeout:
-            if not self.dp.value:
-                return True
-            time.sleep(0.0005)
-        return False
-
-    def read_raw(self) -> int:
-        """Read signed 24-bit value from Channel A, Gain 128."""
-        if not self._ready(1.0):
-            # Return last-resort 'not ready' sentinel (None) so caller can skip
-            return None
-        v = 0
-        # 24 data bits, MSB first
-        for _ in range(24):
-            self.cp.value = True
-            v = (v << 1) | (1 if self.dp.value else 0)
-            self.cp.value = False
-        # 1 extra pulse -> set Channel A, Gain 128 for next conversion
-        self.cp.value = True
-        self.cp.value = False
-        # Sign-extend 24-bit two's complement
-        if v & (1 << 23):
-            v -= (1 << 24)
-        return v
-
-    def read_avg(self, n: int = 3) -> int | None:
-        """Average N reads; skips if ADC not ready."""
-        total = 0
-        count = 0
-        for _ in range(n):
-            r = self.read_raw()
-            if r is None:
-                continue
-            total += r; count += 1
-            time.sleep(0.005)
-        return (total // count) if count else None
 
 class ScaleReader:
     """
-    Threaded reader with median+EMA filtering & stability detection.
-    Auto-tare on idle; calibration with sign auto-fix (always show positive grams).
-    """
-    def __init__(self, alpha=0.2, window=10, display_precision=0.1,
-                 auto_tare=True, auto_tare_idle_secs=30, auto_tare_threshold_g=0.1):
-        data_pin_name  = os.getenv("DATA_PIN",  "D17")  # match your working pins
-        clock_pin_name = os.getenv("CLOCK_PIN", "D27")
+    Threaded reader for the Brecknell B140 scale connected via RS-232.
 
-        self.adc = _HX711BitBang(data_pin_name, clock_pin_name)
+    The scale continuously streams ASCII frames such as:
+        ``ST,GS,  0.000kg`` or ``US,NT,+12.34 g``
+
+    We parse the numeric value, normalise to grams, and expose filtered
+    readings with a stability hint. The interface matches the previous HX711
+    implementation so the rest of the application can remain unchanged.
+    """
+
+    _LINE_SPLIT_RE = re.compile(r"[,\s]+")
+    _NUMBER_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
+
+    def __init__(
+        self,
+        *,
+        serial_port: str | None = None,
+        baudrate: int | None = None,
+        native_counts_per_gram: float | None = None,
+        alpha: float = 0.2,
+        window: int = 10,
+        display_precision: float = 0.1,
+    ) -> None:
+        self.serial_port = serial_port or os.getenv("SCALE_PORT", "/dev/ttyUSB0")
+        self.baudrate = baudrate or _env_int("SCALE_BAUD", 9600)
+        self.native_counts_per_gram = (
+            native_counts_per_gram or _env_float("SCALE_NATIVE_COUNTS_PER_GRAM", 1000.0)
+        )
 
         self.alpha = alpha
-        self.window = deque(maxlen=window)  # ~1s if hz≈10
-        self.ema = None
+        self.window = deque(maxlen=window)
+        self.display_precision = display_precision
 
-        self._adc_lock = threading.Lock()
+        self._serial: serial.Serial | None = None
+        self._serial_lock = threading.Lock()
         self._state_lock = threading.RLock()
 
-        # Calibration (we store sign separately so displayed grams are positive)
-        self._zero_offset = 0       # raw counts at zero
-        self._scale_factor = 1.0    # counts per gram (absolute)
-        self._scale_sign = 1        # +1 or -1
+        self._zero_offset = 0
+        self._scale_factor = float(self.native_counts_per_gram)
+        self._scale_sign = 1
 
-        self.display_precision = display_precision
-        self.auto_tare_enabled = auto_tare
-        self.auto_tare_idle_secs = auto_tare_idle_secs
-        self.auto_tare_threshold_g = auto_tare_threshold_g
-        self._idle_start_ts = time.time()
-
+        self.ema: float | None = None
         self.running = False
         self.latest = dict(g=0.0, stable=False, raw=0)
 
-    def set_calibration(self, zero_offset: int, scale_factor: float):
-        # Store sign & absolute to ensure positive grams on screen
+        self._last_raw_counts: int | None = None
+        self._last_update_ts: float = 0.0
+
+    # ------------------------------------------------------------------
+    # Calibration helpers (maintain HX711-compatible API)
+    def set_calibration(self, zero_offset: int, scale_factor: float) -> None:
         with self._state_lock:
             self._zero_offset = int(zero_offset)
             self._scale_sign = 1 if scale_factor >= 0 else -1
             self._scale_factor = float(abs(scale_factor) if abs(scale_factor) > 1e-9 else 1.0)
-
-    def start(self, hz=10):
-        if self.running: return
-        self.running = True
-        threading.Thread(target=self._loop, args=(hz,), daemon=True).start()
-
-    def stop(self):
-        self.running = False
-
-    def _maybe_auto_tare(self, g_now: float, raw_now: int):
-        if not self.auto_tare_enabled:
-            return
-        if abs(g_now) < self.auto_tare_threshold_g:
-            if time.time() - self._idle_start_ts >= self.auto_tare_idle_secs:
-                # Gentle offset correction (bounded)
-                with self._state_lock:
-                    error_counts = raw_now - self._zero_offset
-                    step = max(-5, min(5, error_counts))
-                    self._zero_offset += step
-                self._idle_start_ts = time.time()
-        else:
-            self._idle_start_ts = time.time()
-
-    def _read_adc_avg_locked(self, n: int) -> int | None:
-        with self._adc_lock:
-            return self.adc.read_avg(n)
-
-    def _loop(self, hz: int):
-        period = 1.0 / float(hz)
-        # Prime the filters
-        for _ in range(max(3, self.window.maxlen // 2)):
-            raw = self._read_adc_avg_locked(2)
-            if raw is not None:
-                self._update(raw)
-            time.sleep(period)
-        # Main loop
-        while self.running:
-            raw = self._read_adc_avg_locked(2)
-            if raw is not None:
-                self._update(raw)
-            time.sleep(period)
-
-    def _update(self, raw: int):
-        # Convert counts -> grams, forcing positive grams using scale_sign
-        with self._state_lock:
-            zero_offset = self._zero_offset
-            scale_factor = self._scale_factor
-            scale_sign = self._scale_sign
-
-        grams = scale_sign * (raw - zero_offset) / scale_factor
-
-        # median-of-window prefilter
-        self.window.append(grams)
-        med = median(self.window) if self.window else grams
-        # EMA
-        self.ema = med if self.ema is None else (self.alpha * med + (1 - self.alpha) * self.ema)
-        # stability over window
-        stable = (len(self.window) >= max(5, self.window.maxlen // 2) and pstdev(self.window) < 0.05)
-
-        # optional idle auto-tare
-        self._maybe_auto_tare(self.ema, raw)
-
-        with self._state_lock:
-            self.latest = dict(
-                g=round(self.ema, 1),  # 0.1 g display
-                stable=stable,
-                raw=int(raw)
-            )
-
-    def read_latest(self) -> dict:
-        with self._state_lock:
-            return dict(self.latest)
-
-    # helpers for calibration endpoints
-    def read_raw_avg(self, n=12) -> int:
-        r = self._read_adc_avg_locked(n)
-        if r is None:
-            # not ready; try once more lightly
-            r = self._read_adc_avg_locked(max(3, n//2))
-        if r is None:
-            # last resort - signal to caller that calibration should abort
-            raise ADCNotReadyError("HX711 did not become ready within the allotted retries")
-        return int(r)
 
     def get_calibration(self) -> dict:
         with self._state_lock:
@@ -203,3 +92,154 @@ class ScaleReader:
                 scale_factor=self._scale_factor,
                 scale_sign=self._scale_sign,
             )
+
+    # ------------------------------------------------------------------
+    def start(self, hz: int | None = None) -> None:
+        if self.running:
+            return
+        self.running = True
+        threading.Thread(target=self._loop, name="ScaleReader", daemon=True).start()
+
+    def stop(self) -> None:
+        self.running = False
+        with self._serial_lock:
+            if self._serial and self._serial.is_open:
+                try:
+                    self._serial.close()
+                except Exception:
+                    pass
+            self._serial = None
+
+    # ------------------------------------------------------------------
+    def read_latest(self) -> dict:
+        with self._state_lock:
+            return dict(self.latest)
+
+    def read_raw_avg(self, n: int = 12) -> int:
+        with self._state_lock:
+            raw = self._last_raw_counts
+            ts = self._last_update_ts
+        if raw is None or (time.time() - ts) > 1.0:
+            raise ADCNotReadyError("Scale did not provide fresh data")
+        return int(raw)
+
+    # ------------------------------------------------------------------
+    def _loop(self) -> None:
+        backoff = 1.0
+        while self.running:
+            if not self._ensure_serial():
+                time.sleep(backoff)
+                backoff = min(backoff * 2.0, 10.0)
+                continue
+
+            backoff = 1.0
+            try:
+                line = self._serial.readline()
+                if not line:
+                    continue
+                try:
+                    text = line.decode("ascii", errors="ignore").strip()
+                except Exception:
+                    continue
+                if not text:
+                    continue
+                parsed = self._parse_line(text)
+                if parsed is None:
+                    continue
+                _, raw_counts, stable_hint = parsed
+                self._update(raw_counts, stable_hint)
+            except serial.SerialException:
+                self._reset_serial()
+                time.sleep(backoff)
+                backoff = min(backoff * 2.0, 10.0)
+            except Exception:
+                # Skip malformed frames, but keep running.
+                continue
+
+    def _ensure_serial(self) -> bool:
+        with self._serial_lock:
+            if self._serial and self._serial.is_open:
+                return True
+            try:
+                self._serial = serial.Serial(
+                    self.serial_port,
+                    baudrate=self.baudrate,
+                    timeout=0.5,
+                )
+                self._serial.reset_input_buffer()
+                return True
+            except serial.SerialException:
+                self._serial = None
+                return False
+
+    def _reset_serial(self) -> None:
+        with self._serial_lock:
+            if self._serial:
+                try:
+                    self._serial.close()
+                except Exception:
+                    pass
+            self._serial = None
+
+    # ------------------------------------------------------------------
+    def _parse_line(self, text: str) -> tuple[float, int, bool | None] | None:
+        """Return (grams, raw_counts, stable_hint) if line parsed; else None."""
+        tokens = [tok.strip().upper() for tok in self._LINE_SPLIT_RE.split(text) if tok.strip()]
+        if not tokens:
+            return None
+
+        stable_hint: bool | None = None
+        for tok in tokens:
+            if tok in {"US", "UN", "UNSTABLE"}:
+                stable_hint = False
+                break
+            if tok in {"ST", "STABLE"}:
+                stable_hint = True
+
+        match = self._NUMBER_RE.search(text.replace(" ", ""))
+        if not match:
+            return None
+        try:
+            value = float(match.group())
+        except ValueError:
+            return None
+
+        lower = text.lower()
+        if "kg" in lower:
+            grams = value * 1000.0
+        elif "lb" in lower:
+            grams = value * 453.59237
+        elif "oz" in lower:
+            grams = value * 28.349523125
+        else:
+            grams = value
+
+        raw_counts = int(round(grams * self.native_counts_per_gram))
+        return grams, raw_counts, stable_hint
+
+    def _update(self, raw_counts: int, stable_hint: bool | None) -> None:
+        with self._state_lock:
+            zero_offset = self._zero_offset
+            scale_factor = self._scale_factor
+            scale_sign = self._scale_sign
+
+        grams = scale_sign * (raw_counts - zero_offset) / scale_factor
+
+        self.window.append(grams)
+        med = median(self.window) if self.window else grams
+        self.ema = med if self.ema is None else (self.alpha * med + (1 - self.alpha) * self.ema)
+
+        computed_stable = (
+            len(self.window) >= max(5, self.window.maxlen // 2)
+            and pstdev(self.window) < 0.05
+        )
+        stable = stable_hint if stable_hint is not None else computed_stable
+
+        value_for_display = self.ema if self.ema is not None else grams
+        precision = self.display_precision if self.display_precision > 0 else 0.1
+        g_display = round(round(value_for_display / precision) * precision, 3)
+
+        with self._state_lock:
+            self.latest = dict(g=g_display, stable=stable, raw=int(raw_counts))
+            self._last_raw_counts = int(raw_counts)
+            self._last_update_ts = time.time()
