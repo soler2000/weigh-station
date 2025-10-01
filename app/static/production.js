@@ -3,15 +3,19 @@ let intervalSelect;
 let startInput;
 let endInput;
 let refreshBtn;
+let totalEl;
 let passEl;
 let failEl;
-let totalEl;
+let passRateEl;
+let passRateSubEl;
 let statusEl;
-let canvas;
-let emptyState;
-let ctx;
-
-let cachedChart = { labels: [], pass: [], fail: [], interval: 'day' };
+let bucketRows;
+let bucketEmpty;
+let bucketSummary;
+let eventRows;
+let eventsEmpty;
+let eventsSummary;
+let eventsNotice;
 
 function setStatus(message, ok = true) {
   if (!statusEl) return;
@@ -19,15 +23,35 @@ function setStatus(message, ok = true) {
   statusEl.style.color = ok ? 'var(--app-fg-muted)' : '#f87171';
 }
 
-function setLoading(loading) {
+function setLoading(isLoading) {
   if (!refreshBtn) return;
-  refreshBtn.disabled = loading;
-  refreshBtn.textContent = loading ? 'Loading…' : 'Refresh';
+  refreshBtn.disabled = isLoading;
+  refreshBtn.textContent = isLoading ? 'Loading…' : 'Refresh';
 }
 
-function formatNum(value) {
+function formatNumber(value) {
   const num = Number(value) || 0;
   return num.toLocaleString();
+}
+
+function formatPercent(rate) {
+  if (rate === null || rate === undefined || Number.isNaN(rate)) {
+    return '—';
+  }
+  return `${(rate * 100).toFixed(1)}%`;
+}
+
+function todayIsoLocal() {
+  const now = new Date();
+  const offset = now.getTimezoneOffset();
+  const local = new Date(now.getTime() - offset * 60000);
+  return local.toISOString().slice(0, 10);
+}
+
+function setDefaultRange() {
+  const today = todayIsoLocal();
+  if (startInput && !startInput.value) startInput.value = today;
+  if (endInput && !endInput.value) endInput.value = today;
 }
 
 async function fetchVariants() {
@@ -52,10 +76,10 @@ async function loadVariants() {
   try {
     const variants = await fetchVariants();
     const options = ['<option value="all">All Variants</option>'];
-    for (const v of variants) {
-      const id = v?.id ?? v?.value;
-      const label = (v && (v.name || v.label || v.display)) ?? `Version ${id ?? ''}`;
+    for (const item of variants) {
+      const id = item?.id ?? item?.value;
       if (id == null) continue;
+      const label = (item?.name || item?.label || item?.display || `Variant ${id}`).toString();
       options.push(`<option value="${id}">${label}</option>`);
     }
     variantSelect.innerHTML = options.join('');
@@ -63,9 +87,6 @@ async function loadVariants() {
       variantSelect.value = current;
     } else {
       variantSelect.value = 'all';
-    }
-    if (variants.length === 0) {
-      setStatus('Showing all variants (none configured yet).');
     }
   } catch (err) {
     console.error(err);
@@ -75,24 +96,9 @@ async function loadVariants() {
   }
 }
 
-function todayIsoLocal() {
-  const now = new Date();
-  const tzOffsetMinutes = now.getTimezoneOffset();
-  const local = new Date(now.getTime() - tzOffsetMinutes * 60000);
-  return local.toISOString().slice(0, 10);
-}
-
-function setDefaultRange() {
-  if (!startInput || !endInput) return;
-  const today = todayIsoLocal();
-  if (!startInput.value) startInput.value = today;
-  if (!endInput.value) endInput.value = today;
-}
-
 function buildQuery() {
-  if (!intervalSelect) return '';
   const params = new URLSearchParams();
-  params.set('interval', intervalSelect.value);
+  if (intervalSelect) params.set('interval', intervalSelect.value);
   if (startInput?.value) params.set('start', startInput.value);
   if (endInput?.value) params.set('end', endInput.value);
   if (variantSelect?.value && variantSelect.value !== 'all') {
@@ -101,128 +107,83 @@ function buildQuery() {
   return params.toString();
 }
 
-function drawChart(labels, passData, failData, interval, cache = true) {
-  if (!canvas || !ctx) return;
-  const width = canvas.clientWidth || 960;
-  const height = canvas.clientHeight || 420;
-  canvas.width = width;
-  canvas.height = height;
-  ctx.clearRect(0, 0, width, height);
+function escapeHtml(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
-  if (!labels.length) {
-    if (cache) {
-      cachedChart = { labels: [], pass: [], fail: [], interval };
-    }
+function renderBuckets(buckets) {
+  if (!bucketRows || !bucketEmpty || !bucketSummary) return;
+  if (!Array.isArray(buckets) || buckets.length === 0) {
+    bucketRows.innerHTML = '';
+    bucketEmpty.hidden = false;
+    bucketSummary.textContent = '';
     return;
   }
 
-  const margin = {
-    left: 64,
-    right: 28,
-    top: 24,
-    bottom: interval === 'hour' ? 96 : 70,
-  };
-  const chartWidth = Math.max(1, width - margin.left - margin.right);
-  const chartHeight = Math.max(1, height - margin.top - margin.bottom);
-  const baseY = height - margin.bottom;
-  const topY = margin.top;
+  const rows = buckets.map(bucket => {
+    const passRate = formatPercent(bucket.pass_rate);
+    return `
+      <tr>
+        <td>${escapeHtml(bucket.label)}</td>
+        <td>${formatNumber(bucket.total)}</td>
+        <td>${formatNumber(bucket.pass)}</td>
+        <td>${formatNumber(bucket.fail)}</td>
+        <td>${passRate}</td>
+      </tr>
+    `;
+  });
 
-  // axes
-  ctx.strokeStyle = 'rgba(148,163,184,0.22)';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(margin.left, baseY);
-  ctx.lineTo(width - margin.right, baseY);
-  ctx.moveTo(margin.left, baseY);
-  ctx.lineTo(margin.left, topY);
-  ctx.stroke();
+  bucketRows.innerHTML = rows.join('');
+  bucketEmpty.hidden = true;
+}
 
-  const totals = labels.map((_, i) => (Number(passData[i]) || 0) + (Number(failData[i]) || 0));
-  const maxTotal = totals.length ? Math.max(...totals, 1) : 1;
-  const yTicks = 5;
-  ctx.font = '12px "Inter", system-ui, sans-serif';
-  ctx.textBaseline = 'middle';
-  for (let i = 0; i <= yTicks; i++) {
-    const value = (maxTotal / yTicks) * i;
-    const y = baseY - (value / maxTotal) * chartHeight;
-    ctx.strokeStyle = 'rgba(148,163,184,0.12)';
-    ctx.beginPath();
-    ctx.moveTo(margin.left, y);
-    ctx.lineTo(width - margin.right, y);
-    ctx.stroke();
-    ctx.fillStyle = '#64748b';
-    ctx.textAlign = 'right';
-    ctx.fillText(Math.round(value).toString(), margin.left - 8, y);
+function renderEvents(events, truncated, limit) {
+  if (!eventRows || !eventsEmpty || !eventsSummary || !eventsNotice) return;
+  if (!Array.isArray(events) || events.length === 0) {
+    eventRows.innerHTML = '';
+    eventsEmpty.hidden = false;
+    eventsSummary.textContent = '';
+    eventsNotice.textContent = '';
+    return;
   }
 
-  const slot = labels.length ? chartWidth / labels.length : chartWidth;
-  const gap = Math.min(8, slot * 0.25);
-  const barWidth = Math.max(2, Math.min(64, slot - gap));
-  const offset = (slot - barWidth) / 2;
-  const rotateLabels = interval === 'hour' || labels.length > 10;
+  const rows = events.map(evt => {
+    const status = evt.status === 'pass' ? 'Pass' : evt.status === 'fail' ? 'Fail' : '—';
+    const weight = evt.net_g === null || evt.net_g === undefined ? '—' : Number(evt.net_g).toFixed(2);
+    return `
+      <tr>
+        <td>${escapeHtml(evt.ts)}</td>
+        <td>${escapeHtml(evt.variant ?? '—')}</td>
+        <td>${escapeHtml(evt.serial ?? '—')}</td>
+        <td>${escapeHtml(evt.moulding_serial ?? '—')}</td>
+        <td>${escapeHtml(evt.contract ?? '—')}</td>
+        <td>${escapeHtml(evt.order_number ?? '—')}</td>
+        <td>${escapeHtml(evt.operator ?? '—')}</td>
+        <td>${escapeHtml(evt.colour ?? '—')}</td>
+        <td>${status}</td>
+        <td>${weight}</td>
+      </tr>
+    `;
+  });
 
-  for (let i = 0; i < labels.length; i++) {
-    const passVal = Number(passData[i]) || 0;
-    const failVal = Number(failData[i]) || 0;
-    const x = margin.left + slot * i + offset;
-    const scale = maxTotal ? chartHeight / maxTotal : 0;
-    const minVisible = chartHeight > 0 ? Math.min(2, chartHeight) : 0;
-    let passHeight = passVal * scale;
-    let failHeight = failVal * scale;
-    if (passVal > 0 && passHeight < minVisible) passHeight = minVisible;
-    if (failVal > 0 && failHeight < minVisible) failHeight = minVisible;
-    let combined = passHeight + failHeight;
-    if (combined > chartHeight) {
-      const ratio = chartHeight / combined;
-      passHeight *= ratio;
-      failHeight *= ratio;
-      combined = chartHeight;
-    }
-    const passY = baseY - passHeight;
-    const failY = passY - failHeight;
-
-    ctx.fillStyle = 'rgba(34,197,94,0.85)';
-    if (passHeight > 0) {
-      ctx.fillRect(x, passY, barWidth, passHeight);
-    }
-
-    ctx.fillStyle = 'rgba(239,68,68,0.85)';
-    if (failHeight > 0) {
-      ctx.fillRect(x, failY, barWidth, failHeight);
-    }
-
-    ctx.save();
-    const centerX = x + barWidth / 2;
-    ctx.fillStyle = '#94a3b8';
-    if (rotateLabels) {
-      ctx.translate(centerX, height - margin.bottom + 16);
-      ctx.rotate(-Math.PI / 4);
-      ctx.textAlign = 'right';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(labels[i], 0, 0);
-    } else {
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-      ctx.fillText(labels[i], centerX, height - margin.bottom + 8);
-    }
-    ctx.restore();
-  }
-
-  if (cache) {
-    cachedChart = {
-      labels: labels.slice(),
-      pass: passData.slice(),
-      fail: failData.slice(),
-      interval,
-    };
+  eventRows.innerHTML = rows.join('');
+  eventsEmpty.hidden = true;
+  eventsSummary.textContent = `Showing ${events.length} event${events.length === 1 ? '' : 's'}.`;
+  if (truncated) {
+    eventsNotice.textContent = `Showing the first ${events.length} events (limit ${limit}). Narrow the date range to see additional history.`;
+  } else {
+    eventsNotice.textContent = '';
   }
 }
 
 async function refresh() {
-  if (!variantSelect || !intervalSelect || !startInput || !endInput || !passEl || !failEl || !totalEl || !emptyState) {
-    console.error('Production Output page is missing required elements.');
-    return;
-  }
+  if (!startInput || !endInput) return;
   if (startInput.value && endInput.value && startInput.value > endInput.value) {
     setStatus('From date must be on or before the To date.', false);
     return;
@@ -237,101 +198,89 @@ async function refresh() {
     if (!res.ok) {
       let msg = 'Failed to load production output.';
       try {
-        const err = await res.json();
-        if (err && err.detail) msg = err.detail;
-      } catch {}
+        const payload = await res.json();
+        if (payload?.detail) msg = payload.detail;
+      } catch (_) {}
       throw new Error(msg);
     }
 
     const payload = await res.json();
-    const buckets = Array.isArray(payload.buckets) ? payload.buckets : [];
-    const labels = buckets.map(b => b.label);
-    const passData = buckets.map(b => b.pass ?? 0);
-    const failData = buckets.map(b => b.fail ?? 0);
-
-    if (payload.start && startInput) {
-      startInput.value = payload.start;
-    }
-    if (payload.end && endInput) {
-      endInput.value = payload.end;
-    }
-
-    drawChart(labels, passData, failData, payload.interval || intervalSelect.value);
-
     const totals = payload.totals || {};
-    const passTotal = totals.pass ?? 0;
-    const failTotal = totals.fail ?? 0;
-    const total = totals.total ?? passTotal + failTotal;
-    passEl.textContent = formatNum(passTotal);
-    failEl.textContent = formatNum(failTotal);
-    totalEl.textContent = formatNum(total);
 
-    const hasValues = buckets.some(b => {
-      const passVal = Number(b.pass) || 0;
-      const failVal = Number(b.fail) || 0;
-      const totalVal = Number(b.total) || 0;
-      return passVal + failVal > 0 || totalVal > 0;
-    });
-    emptyState.hidden = hasValues;
-    if (!hasValues) {
-      emptyState.textContent = 'No production results for the selected filters.';
+    if (startInput && payload.start) startInput.value = payload.start;
+    if (endInput && payload.end) endInput.value = payload.end;
+
+    totalEl.textContent = formatNumber(totals.total ?? 0);
+    passEl.textContent = formatNumber(totals.pass ?? 0);
+    failEl.textContent = formatNumber(totals.fail ?? 0);
+
+    const passRate = totals.pass_rate ?? null;
+    passRateEl.textContent = formatPercent(passRate);
+    if (passRate !== null && passRate !== undefined && !Number.isNaN(passRate)) {
+      const totalCount = totals.total ?? 0;
+      passRateSubEl.textContent = `Based on ${formatNumber(totalCount)} result${totalCount === 1 ? '' : 's'}.`;
+    } else {
+      passRateSubEl.textContent = '';
     }
 
-    const variantName = payload.variant?.name;
-    const intervalLabel = (payload.interval === 'hour') ? 'hour' : 'day';
-    const plural = labels.length === 1 ? '' : 's';
+    renderBuckets(payload.buckets || []);
+    if (bucketSummary) {
+      const count = Array.isArray(payload.buckets) ? payload.buckets.length : 0;
+      bucketSummary.textContent = count ? `${count} bucket${count === 1 ? '' : 's'} returned.` : '';
+    }
+
+    renderEvents(payload.events || [], payload.events_truncated, payload.events_limit);
+
+    const labelsCount = Array.isArray(payload.buckets) ? payload.buckets.length : 0;
+    const intervalLabel = payload.interval === 'hour' ? 'hour' : 'day';
+    const variantName = payload.variant?.name || (variantSelect?.value && variantSelect.value !== 'all' ? `Variant ${variantSelect.value}` : 'All variants');
     const rangeText = `${payload.start ?? startInput.value || '—'} → ${payload.end ?? endInput.value || '—'}`;
-    const variantText = variantName ? ` • ${variantName}` : '';
-    setStatus(`Showing ${labels.length} ${intervalLabel}${plural} (${rangeText})${variantText}.`);
+    setStatus(`Showing ${labelsCount} ${intervalLabel}${labelsCount === 1 ? '' : 's'} for ${variantName} (${rangeText}).`);
   } catch (err) {
     console.error(err);
-    drawChart([], [], [], intervalSelect.value);
-    cachedChart = { labels: [], pass: [], fail: [], interval: intervalSelect.value };
-    emptyState.hidden = false;
-    emptyState.textContent = err.message || 'No production results for the selected filters.';
+    totalEl.textContent = '0';
     passEl.textContent = '0';
     failEl.textContent = '0';
-    totalEl.textContent = '0';
+    passRateEl.textContent = '—';
+    passRateSubEl.textContent = '';
+    renderBuckets([]);
+    renderEvents([], false, 0);
     setStatus(err.message || 'Failed to load production output.', false);
   } finally {
     setLoading(false);
   }
 }
 
-function handleResize() {
-  if (!cachedChart.labels.length || !ctx) return;
-  drawChart(cachedChart.labels, cachedChart.pass, cachedChart.fail, cachedChart.interval, false);
-}
-
-let initialized = false;
 async function init() {
-  if (initialized) return;
   variantSelect = document.getElementById('variant');
   intervalSelect = document.getElementById('interval');
   startInput = document.getElementById('start');
   endInput = document.getElementById('end');
   refreshBtn = document.getElementById('refresh');
+  totalEl = document.getElementById('totalCount');
   passEl = document.getElementById('passCount');
   failEl = document.getElementById('failCount');
-  totalEl = document.getElementById('totalCount');
+  passRateEl = document.getElementById('passRate');
+  passRateSubEl = document.getElementById('passRateSub');
   statusEl = document.getElementById('status');
-  canvas = document.getElementById('outputChart');
-  emptyState = document.getElementById('emptyState');
+  bucketRows = document.getElementById('bucketRows');
+  bucketEmpty = document.getElementById('bucketEmpty');
+  bucketSummary = document.getElementById('bucketSummary');
+  eventRows = document.getElementById('eventRows');
+  eventsEmpty = document.getElementById('eventsEmpty');
+  eventsSummary = document.getElementById('eventsSummary');
+  eventsNotice = document.getElementById('eventsNotice');
 
-  if (!variantSelect || !intervalSelect || !startInput || !endInput || !refreshBtn || !passEl || !failEl || !totalEl || !statusEl || !canvas || !emptyState) {
+  if (!variantSelect || !intervalSelect || !startInput || !endInput || !refreshBtn || !totalEl || !passEl || !failEl || !passRateEl || !statusEl) {
     console.error('Production Output page markup is missing required elements.');
     return;
   }
-
-  ctx = canvas.getContext('2d');
-  initialized = true;
 
   refreshBtn.addEventListener('click', refresh);
   variantSelect.addEventListener('change', refresh);
   intervalSelect.addEventListener('change', refresh);
   startInput.addEventListener('change', refresh);
   endInput.addEventListener('change', refresh);
-  window.addEventListener('resize', handleResize);
 
   setDefaultRange();
   await loadVariants();

@@ -6,23 +6,26 @@
   <title>Production Output • Weigh Station</title>
   <link rel="stylesheet" href="/static/styles.css?v=app-theme-1">
   <style>
-    .filters { display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end; }
+    .filters { display:flex; flex-wrap:wrap; gap:16px; align-items:flex-end; }
     .filters .field { display:flex; flex-direction:column; gap:6px; min-width:150px; }
     .filters .field label { font-size:0.72rem; letter-spacing:0.08em; text-transform:uppercase; color:var(--app-fg-muted); }
-    .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:14px; margin-bottom:18px; }
+    .filters button { height:42px; }
+    .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:16px; margin-bottom:12px; }
     .metric { background:rgba(148,163,184,0.08); border-radius:14px; padding:14px 16px; display:flex; flex-direction:column; gap:6px; }
     .metric .metric-label { font-size:0.8rem; text-transform:uppercase; letter-spacing:0.08em; color:var(--app-fg-muted); }
     .metric .metric-value { font-weight:700; font-size:clamp(1.6rem,3vw,2.2rem); }
-    .chart-wrap { position:relative; width:100%; height:clamp(320px,60vh,540px); }
-    #outputChart { width:100%; height:100%; display:block; background:rgba(15,19,30,0.86); border:1px solid rgba(148,163,184,0.22); border-radius:18px; }
-    #emptyState { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; color:var(--app-fg-muted); font-size:1rem; padding:0 18px; pointer-events:none; background:transparent; }
-    .legend { margin-top:14px; display:flex; gap:16px; flex-wrap:wrap; color:var(--app-fg-muted); font-size:0.9rem; }
-    .legend span { display:inline-flex; align-items:center; gap:8px; }
-    .legend i { width:14px; height:14px; border-radius:4px; display:inline-block; }
+    .metric .metric-sub { font-size:0.85rem; color:var(--app-fg-muted); }
+    .table-scroll { overflow-x:auto; margin-top:12px; border-radius:12px; border:1px solid rgba(148,163,184,0.18); }
+    .table-scroll table { min-width:720px; }
     #status { margin-top:14px; min-height:1.4em; color:var(--app-fg-muted); }
+    #bucketEmpty, #eventsEmpty { margin:12px 0 0; }
+    .section-header { display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; }
+    .section-header h2 { margin:0; }
+    .muted-small { color:var(--app-fg-muted); font-size:0.85rem; }
     @media (max-width: 720px) {
       .filters { flex-direction:column; align-items:stretch; }
       .filters button { width:100%; }
+      .table-scroll table { min-width:600px; }
     }
   </style>
 </head>
@@ -47,7 +50,7 @@
       <div class="row between" style="align-items:flex-start;">
         <div>
           <h1 style="margin-bottom:6px;">Production Output</h1>
-          <p class="muted" style="max-width:520px;">Review pass and fail counts for each product version across the selected date range. Toggle between hourly and daily buckets to zoom in on throughput.</p>
+          <p class="muted" style="max-width:520px;">Review total output, pass rates and the individual weigh events captured for the selected filters. Toggle between hourly and daily grouping to zoom in on activity.</p>
         </div>
         <div class="filters">
           <div class="field">
@@ -90,19 +93,66 @@
           <div class="metric-label">Failed</div>
           <div id="failCount" class="metric-value">0</div>
         </div>
-      </div>
-      <div class="chart-wrap">
-        <canvas id="outputChart"></canvas>
-        <div id="emptyState" hidden>No production results for the selected filters.</div>
-      </div>
-      <div class="legend">
-        <span><i style="background:#22c55e;"></i>Passed</span>
-        <span><i style="background:#ef4444;"></i>Failed</span>
+        <div class="metric">
+          <div class="metric-label">Pass Rate</div>
+          <div id="passRate" class="metric-value">—</div>
+          <div id="passRateSub" class="metric-sub"></div>
+        </div>
       </div>
       <div id="status"></div>
     </section>
+
+    <section class="card">
+      <div class="section-header">
+        <h2>Production Buckets</h2>
+        <span id="bucketSummary" class="muted-small"></span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Bucket</th>
+              <th scope="col">Total</th>
+              <th scope="col">Passed</th>
+              <th scope="col">Failed</th>
+              <th scope="col">Pass Rate</th>
+            </tr>
+          </thead>
+          <tbody id="bucketRows"></tbody>
+        </table>
+      </div>
+      <p id="bucketEmpty" class="muted" hidden>No production totals found for the selected filters.</p>
+    </section>
+
+    <section class="card">
+      <div class="section-header">
+        <h2>Weigh Events</h2>
+        <span id="eventsSummary" class="muted-small"></span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Timestamp</th>
+              <th scope="col">Variant</th>
+              <th scope="col">Serial</th>
+              <th scope="col">Moulding Serial</th>
+              <th scope="col">Contract</th>
+              <th scope="col">Order #</th>
+              <th scope="col">Operator</th>
+              <th scope="col">Colour</th>
+              <th scope="col">Result</th>
+              <th scope="col">Net (g)</th>
+            </tr>
+          </thead>
+          <tbody id="eventRows"></tbody>
+        </table>
+      </div>
+      <p id="eventsEmpty" class="muted" hidden>No weigh events recorded for the selected filters.</p>
+      <p id="eventsNotice" class="muted-small"></p>
+    </section>
   </main>
 
-  <script src="/static/production.js?v=20241001"></script>
+  <script src="/static/production.js?v=20241015"></script>
 </body>
 </html>

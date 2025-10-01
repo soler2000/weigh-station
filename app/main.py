@@ -1,5 +1,5 @@
 import asyncio, csv, io, os
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from pathlib import Path
 from datetime import date, datetime, timedelta, time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request, Path as FPath
@@ -451,73 +451,132 @@ def production_output(
         while current <= end_date:
             bucket_labels.append(current.isoformat())
             current += timedelta(days=1)
-        bucket_format = "%Y-%m-%d"
     else:
         max_hours = 31 * 24  # ~1 month of hourly buckets
         total_hours = int((end_dt - start_dt).total_seconds() // 3600)
         if total_hours > max_hours:
             raise HTTPException(400, f"Date range too large for hourly view (max {max_hours} hours).")
         current_dt = start_dt
-        bucket_format = "%Y-%m-%d %H:00"
         while current_dt < end_dt:
-            bucket_labels.append(current_dt.strftime(bucket_format))
+            bucket_labels.append(current_dt.strftime("%Y-%m-%d %H:00"))
             current_dt += timedelta(hours=1)
 
-    bucket_col = func.strftime(bucket_format, WeighEvent.ts)
-    pass_condition = _pass_condition_expr()
-    fail_condition = _fail_condition_expr()
-    pass_sum = func.sum(case((pass_condition, 1), else_=0))
-    total_sum = func.count(WeighEvent.id)
+    def _bucket_label(ts: datetime) -> str:
+        if interval == "day":
+            return ts.strftime("%Y-%m-%d")
+        aligned = ts.replace(minute=0, second=0, microsecond=0)
+        return aligned.strftime("%Y-%m-%d %H:00")
+
+    def _classify(value: Optional[object]) -> Optional[bool]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            if value == 1:
+                return True
+            if value == 0:
+                return False
+        if isinstance(value, str):
+            token = value.strip().lower()
+            if token in {"1", "true", "t", "pass", "p", "yes", "y"}:
+                return True
+            if token in {"0", "false", "f", "fail", "failed", "no", "n"}:
+                return False
+        return None
 
     with Session() as s:
         variant_meta = None
+        variants_by_id = {
+            row.id: (row.name or "").strip() or f"Variant {row.id}"
+            for row in s.query(Variant).all()
+        }
+
         if variant_id is not None:
             variant = s.get(Variant, int(variant_id))
             if not variant:
                 raise HTTPException(404, "Variant not found")
             variant_meta = {"id": variant.id, "name": variant.name}
 
-        q = s.query(
-            bucket_col.label("bucket"),
-            pass_sum.label("pass_count"),
-            total_sum.label("total_count"),
-            func.min(WeighEvent.ts).label("sample_ts"),
-        ).filter(WeighEvent.ts >= start_dt, WeighEvent.ts < end_dt)
+        q = (
+            s.query(WeighEvent)
+            .filter(WeighEvent.ts >= start_dt, WeighEvent.ts < end_dt)
+            .order_by(WeighEvent.ts.asc())
+        )
 
         if variant_id is not None:
             q = q.filter(WeighEvent.variant_id == variant_id)
 
-        rows = q.group_by(bucket_col).order_by(bucket_col).all()
+        rows: List[WeighEvent] = q.all()
 
-    def _normalize_label(raw: Optional[str], sample_ts: Optional[datetime]) -> Optional[str]:
-        if raw:
-            return raw
-        if not sample_ts:
-            return None
-        if interval == "day":
-            return sample_ts.strftime("%Y-%m-%d")
-        aligned = sample_ts.replace(minute=0, second=0, microsecond=0)
-        return aligned.strftime("%Y-%m-%d %H:00")
+    bucket_totals: Dict[str, Dict[str, int]] = {
+        label: {"pass": 0, "fail": 0, "total": 0} for label in bucket_labels
+    }
 
-    bucket_map = {}
-    for row in rows:
-        normalized = _normalize_label(row.bucket, row.sample_ts)
-        if not normalized:
-            continue
-        bucket_map[normalized] = row
-    data = []
     total_pass = 0
     total_fail = 0
     total_count = 0
+
+    event_limit = 500
+    events_payload: List[dict] = []
+    events_truncated = False
+
+    for idx, row in enumerate(rows):
+        label = _bucket_label(row.ts)
+        bucket = bucket_totals.setdefault(label, {"pass": 0, "fail": 0, "total": 0})
+        bucket["total"] += 1
+        status = _classify(row.in_range)
+        if status is True:
+            bucket["pass"] += 1
+        elif status is False:
+            bucket["fail"] += 1
+
+        if idx < event_limit:
+            events_payload.append(
+                {
+                    "ts": row.ts.isoformat(),
+                    "variant_id": row.variant_id,
+                    "variant": variants_by_id.get(
+                        row.variant_id, f"Variant {row.variant_id}" if row.variant_id else "—"
+                    ),
+                    "serial": row.serial,
+                    "moulding_serial": row.moulding_serial,
+                    "contract": row.contract,
+                    "order_number": row.order_number,
+                    "operator": row.operator,
+                    "colour": row.colour,
+                    "notes": row.notes,
+                    "net_g": row.net_g,
+                    "status": "pass" if status is True else "fail" if status is False else None,
+                }
+            )
+        else:
+            events_truncated = True
+
+    bucket_data: List[dict] = []
+
     for label in bucket_labels:
-        row = bucket_map.get(label)
-        p = int(row.pass_count) if row and row.pass_count is not None else 0
-        t = int(row.total_count) if row and row.total_count is not None else p
-        f = max(t - p, 0)
-        data.append({"label": label, "pass": p, "fail": f, "total": t})
-        total_pass += p
-        total_fail += f
-        total_count += t
+        bucket = bucket_totals.get(label) or {"pass": 0, "fail": 0, "total": 0}
+        total = int(bucket.get("total", 0) or 0)
+        passed = int(bucket.get("pass", 0) or 0)
+        # Ensure unknown results still surface as fails so totals match the row count
+        explicit_fail = int(bucket.get("fail", 0) or 0)
+        fail = max(explicit_fail, total - passed)
+        rate = (passed / total) if total else None
+        bucket_data.append(
+            {
+                "label": label,
+                "pass": passed,
+                "fail": fail,
+                "total": total,
+                "pass_rate": rate,
+            }
+        )
+        total_pass += passed
+        total_fail += fail
+        total_count += total
+
+    overall_rate = (total_pass / total_count) if total_count else None
 
     return {
         "interval": interval,
@@ -525,12 +584,16 @@ def production_output(
         "end": end_date.isoformat(),
         "bucket_count": len(bucket_labels),
         "variant": variant_meta,
-        "buckets": data,
+        "buckets": bucket_data,
         "totals": {
             "pass": total_pass,
             "fail": total_fail,
             "total": total_count or (total_pass + total_fail),
+            "pass_rate": overall_rate,
         },
+        "events": events_payload,
+        "events_truncated": events_truncated,
+        "events_limit": event_limit,
     }
 # --- CSV export
 @app.get("/export.csv")
