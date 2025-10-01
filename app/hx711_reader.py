@@ -1,200 +1,138 @@
-# app/hx711_reader.py
-import os, threading, time
+"""Scale reader for Brecknell B140 over RS-232."""
+import os
+import re
+import threading
+import time
 from collections import deque
+from datetime import datetime
 from statistics import median, pstdev
+from typing import Any
 
-import board, digitalio
+import serial
 
-# NOTE: Temp compensation skipped for MVP. TODO: add DS18B20 support later if needed.
 
-def _get_pin(name: str):
-    """Accepts 'D17','GPIO17' etc, returns board pin object."""
-    name = (name or "").upper()
-    if hasattr(board, name):
-        return getattr(board, name)
-    if name.startswith("GPIO") and hasattr(board, "D"+name[4:]):
-        return getattr(board, "D"+name[4:])
-    raise ValueError(f"Unknown pin name: {name}")
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return bool(default)
+    value = value.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return int(default)
+
 
 class ADCNotReadyError(RuntimeError):
-    """Raised when the HX711 ADC does not present data within the retry window."""
+    """Raised when the serial scale does not provide fresh data in time."""
 
-
-class _HX711BitBang:
-    """
-    Minimal, robust HX711 reader (Channel A @ Gain 128).
-    Uses digitalio directly; no external HX711 libs.
-    """
-    def __init__(self, data_pin_name: str, clock_pin_name: str):
-        dp = digitalio.DigitalInOut(_get_pin(data_pin_name))
-        cp = digitalio.DigitalInOut(_get_pin(clock_pin_name))
-        dp.direction = digitalio.Direction.INPUT
-        cp.direction = digitalio.Direction.OUTPUT
-        cp.value = False  # idle low
-        self.dp, self.cp = dp, cp
-
-    def _ready(self, timeout: float = 1.0) -> bool:
-        t0 = time.time()
-        # DOUT goes LOW when ready
-        while time.time() - t0 < timeout:
-            if not self.dp.value:
-                return True
-            time.sleep(0.0005)
-        return False
-
-    def read_raw(self) -> int:
-        """Read signed 24-bit value from Channel A, Gain 128."""
-        if not self._ready(1.0):
-            # Return last-resort 'not ready' sentinel (None) so caller can skip
-            return None
-        v = 0
-        # 24 data bits, MSB first
-        for _ in range(24):
-            self.cp.value = True
-            v = (v << 1) | (1 if self.dp.value else 0)
-            self.cp.value = False
-        # 1 extra pulse -> set Channel A, Gain 128 for next conversion
-        self.cp.value = True
-        self.cp.value = False
-        # Sign-extend 24-bit two's complement
-        if v & (1 << 23):
-            v -= (1 << 24)
-        return v
-
-    def read_avg(self, n: int = 3) -> int | None:
-        """Average N reads; skips if ADC not ready."""
-        total = 0
-        count = 0
-        for _ in range(n):
-            r = self.read_raw()
-            if r is None:
-                continue
-            total += r; count += 1
-            time.sleep(0.005)
-        return (total // count) if count else None
 
 class ScaleReader:
     """
-    Threaded reader with median+EMA filtering & stability detection.
-    Auto-tare on idle; calibration with sign auto-fix (always show positive grams).
-    """
-    def __init__(self, alpha=0.2, window=10, display_precision=0.1,
-                 auto_tare=True, auto_tare_idle_secs=30, auto_tare_threshold_g=0.1):
-        data_pin_name  = os.getenv("DATA_PIN",  "D17")  # match your working pins
-        clock_pin_name = os.getenv("CLOCK_PIN", "D27")
+    Threaded reader for the Brecknell B140 scale connected via RS-232.
 
-        self.adc = _HX711BitBang(data_pin_name, clock_pin_name)
+    The scale continuously streams ASCII frames such as:
+        ``ST,GS,  0.000kg`` or ``US,NT,+12.34 g``
+
+    We parse the numeric value, normalise to grams, and expose filtered
+    readings with a stability hint. The interface matches the previous HX711
+    implementation so the rest of the application can remain unchanged.
+    """
+
+    _LINE_SPLIT_RE = re.compile(r"[,\s]+")
+    _NUMBER_PATTERN = r"[-+]?(?:\d+(?:\.\d+)?|\.\d+)"
+    _NUMBER_RE = re.compile(_NUMBER_PATTERN)
+    _NUMBER_WITH_UNIT_RE = re.compile(
+        rf"({_NUMBER_PATTERN})\s*(KG|KGS?|KILOGRAMS?|LB|LBS?|POUNDS?|OZ|OZS?|OUNCES?|G|GRAMS?)",
+        re.IGNORECASE,
+    )
+    _NET_VALUE_RE = re.compile(
+        rf"\bNETT?(?:\s*(?:WEIGHT|WT\.?))?\b[:=\s]*({_NUMBER_PATTERN})(?:\s*(KG|KGS?|KILOGRAMS?|LB|LBS?|POUNDS?|OZ|OZS?|OUNCES?|G|GRAMS?))?",
+        re.IGNORECASE,
+    )
+    _VERBOSE_FIELD_RE = re.compile(
+        r"\b(DATE|TIME|GROSS|TARE|MERCHANDISE|PIECE|TOTAL|COUNT|ITEM)\b",
+        re.IGNORECASE,
+    )
+
+    def __init__(
+        self,
+        *,
+        serial_port: str | None = None,
+        baudrate: int | None = None,
+        native_counts_per_gram: float | None = None,
+        alpha: float = 0.2,
+        window: int = 10,
+        display_precision: float = 0.1,
+    ) -> None:
+        self.serial_port = serial_port or os.getenv("SCALE_PORT", "/dev/ttyUSB0")
+        self.baudrate = baudrate or _env_int("SCALE_BAUD", 9600)
+        self.timeout = _env_float("SCALE_TIMEOUT", 0.5)
+        self.native_counts_per_gram = (
+            native_counts_per_gram or _env_float("SCALE_NATIVE_COUNTS_PER_GRAM", 1000.0)
+        )
+        kg_factor = _env_float("SCALE_KG_TO_GRAMS", 1000.0)
+        self.kg_to_grams = kg_factor if kg_factor > 0 else 100.0
+        self.net_default_unit = self._coerce_net_unit(os.getenv("SCALE_NET_UNIT", "auto"))
+
+        self.bytesize = self._coerce_bytesize(os.getenv("SCALE_BYTESIZE"))
+        self.parity = self._coerce_parity(os.getenv("SCALE_PARITY"))
+        self.stopbits = self._coerce_stopbits(os.getenv("SCALE_STOPBITS"))
+        self.xonxoff = _env_bool("SCALE_XONXOFF", False)
+        self.rtscts = _env_bool("SCALE_RTSCTS", False)
+        self.dsrdtr = _env_bool("SCALE_DSRDTR", False)
+        self.set_dtr = _env_bool("SCALE_FORCE_DTR", True)
+        self.set_rts = _env_bool("SCALE_FORCE_RTS", True)
+
+        self.frame_terminator = self._coerce_terminator(
+            os.getenv("SCALE_FRAME_TERMINATOR", "\\r"),
+        )
+        self.frame_max_bytes = _env_int("SCALE_FRAME_MAX_BYTES", 64)
+        if self.frame_max_bytes <= 0:
+            self.frame_max_bytes = 64
 
         self.alpha = alpha
-        self.window = deque(maxlen=window)  # ~1s if hz≈10
-        self.ema = None
+        self.window = deque(maxlen=window)
+        self.display_precision = display_precision
 
-        self._adc_lock = threading.Lock()
+        self._serial: serial.Serial | None = None
+        self._serial_lock = threading.Lock()
         self._state_lock = threading.RLock()
 
-        # Calibration (we store sign separately so displayed grams are positive)
-        self._zero_offset = 0       # raw counts at zero
-        self._scale_factor = 1.0    # counts per gram (absolute)
-        self._scale_sign = 1        # +1 or -1
+        self._zero_offset = 0
+        self._scale_factor = float(self.native_counts_per_gram)
+        self._scale_sign = 1
 
-        self.display_precision = display_precision
-        self.auto_tare_enabled = auto_tare
-        self.auto_tare_idle_secs = auto_tare_idle_secs
-        self.auto_tare_threshold_g = auto_tare_threshold_g
-        self._idle_start_ts = time.time()
-
+        self.ema: float | None = None
         self.running = False
         self.latest = dict(g=0.0, stable=False, raw=0)
 
-    def set_calibration(self, zero_offset: int, scale_factor: float):
-        # Store sign & absolute to ensure positive grams on screen
+        self._last_raw_counts: int | None = None
+        self._last_update_ts: float = 0.0
+        self._raw_log: deque[dict[str, Any]] = deque(maxlen=2000)
+        self._last_data_ts: float | None = None
+
+    # ------------------------------------------------------------------
+    # Calibration helpers (maintain HX711-compatible API)
+    def set_calibration(self, zero_offset: int, scale_factor: float) -> None:
         with self._state_lock:
             self._zero_offset = int(zero_offset)
             self._scale_sign = 1 if scale_factor >= 0 else -1
             self._scale_factor = float(abs(scale_factor) if abs(scale_factor) > 1e-9 else 1.0)
-
-    def start(self, hz=10):
-        if self.running: return
-        self.running = True
-        threading.Thread(target=self._loop, args=(hz,), daemon=True).start()
-
-    def stop(self):
-        self.running = False
-
-    def _maybe_auto_tare(self, g_now: float, raw_now: int):
-        if not self.auto_tare_enabled:
-            return
-        if abs(g_now) < self.auto_tare_threshold_g:
-            if time.time() - self._idle_start_ts >= self.auto_tare_idle_secs:
-                # Gentle offset correction (bounded)
-                with self._state_lock:
-                    error_counts = raw_now - self._zero_offset
-                    step = max(-5, min(5, error_counts))
-                    self._zero_offset += step
-                self._idle_start_ts = time.time()
-        else:
-            self._idle_start_ts = time.time()
-
-    def _read_adc_avg_locked(self, n: int) -> int | None:
-        with self._adc_lock:
-            return self.adc.read_avg(n)
-
-    def _loop(self, hz: int):
-        period = 1.0 / float(hz)
-        # Prime the filters
-        for _ in range(max(3, self.window.maxlen // 2)):
-            raw = self._read_adc_avg_locked(2)
-            if raw is not None:
-                self._update(raw)
-            time.sleep(period)
-        # Main loop
-        while self.running:
-            raw = self._read_adc_avg_locked(2)
-            if raw is not None:
-                self._update(raw)
-            time.sleep(period)
-
-    def _update(self, raw: int):
-        # Convert counts -> grams, forcing positive grams using scale_sign
-        with self._state_lock:
-            zero_offset = self._zero_offset
-            scale_factor = self._scale_factor
-            scale_sign = self._scale_sign
-
-        grams = scale_sign * (raw - zero_offset) / scale_factor
-
-        # median-of-window prefilter
-        self.window.append(grams)
-        med = median(self.window) if self.window else grams
-        # EMA
-        self.ema = med if self.ema is None else (self.alpha * med + (1 - self.alpha) * self.ema)
-        # stability over window
-        stable = (len(self.window) >= max(5, self.window.maxlen // 2) and pstdev(self.window) < 0.05)
-
-        # optional idle auto-tare
-        self._maybe_auto_tare(self.ema, raw)
-
-        with self._state_lock:
-            self.latest = dict(
-                g=round(self.ema, 1),  # 0.1 g display
-                stable=stable,
-                raw=int(raw)
-            )
-
-    def read_latest(self) -> dict:
-        with self._state_lock:
-            return dict(self.latest)
-
-    # helpers for calibration endpoints
-    def read_raw_avg(self, n=12) -> int:
-        r = self._read_adc_avg_locked(n)
-        if r is None:
-            # not ready; try once more lightly
-            r = self._read_adc_avg_locked(max(3, n//2))
-        if r is None:
-            # last resort - signal to caller that calibration should abort
-            raise ADCNotReadyError("HX711 did not become ready within the allotted retries")
-        return int(r)
 
     def get_calibration(self) -> dict:
         with self._state_lock:
@@ -203,3 +141,451 @@ class ScaleReader:
                 scale_factor=self._scale_factor,
                 scale_sign=self._scale_sign,
             )
+
+    # ------------------------------------------------------------------
+    def start(self, hz: int | None = None) -> None:
+        if self.running:
+            return
+        self.running = True
+        threading.Thread(target=self._loop, name="ScaleReader", daemon=True).start()
+
+    def stop(self) -> None:
+        self.running = False
+        with self._serial_lock:
+            if self._serial and self._serial.is_open:
+                try:
+                    self._serial.close()
+                except Exception:
+                    pass
+            self._serial = None
+
+    # ------------------------------------------------------------------
+    def read_latest(self) -> dict:
+        with self._state_lock:
+            return dict(self.latest)
+
+    def read_raw_avg(self, n: int = 12) -> int:
+        with self._state_lock:
+            raw = self._last_raw_counts
+            ts = self._last_update_ts
+        if raw is None or (time.time() - ts) > 1.0:
+            raise ADCNotReadyError("Scale did not provide fresh data")
+        return int(raw)
+
+    def get_serial_log(self, limit: int = 200) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), self._raw_log.maxlen or 2000))
+        with self._state_lock:
+            items = list(self._raw_log)[-limit:]
+        result: list[dict[str, Any]] = []
+        for item in items:
+            ts = float(item.get("ts", 0.0) or 0.0)
+            ts_iso = None
+            if ts:
+                ts_iso = datetime.fromtimestamp(ts).isoformat(timespec="milliseconds")
+            result.append(
+                dict(
+                    ts=ts_iso,
+                    raw=str(item.get("raw", "")),
+                    parsed=bool(item.get("parsed", False)),
+                    grams=item.get("grams"),
+                    raw_counts=item.get("raw_counts"),
+                    stable_hint=item.get("stable_hint"),
+                    event=item.get("event"),
+                )
+            )
+        return result
+
+    # ------------------------------------------------------------------
+    def _loop(self) -> None:
+        backoff = 1.0
+        while self.running:
+            if not self._ensure_serial():
+                time.sleep(backoff)
+                backoff = min(backoff * 2.0, 10.0)
+                continue
+
+            backoff = 1.0
+            try:
+                line = self._serial.read_until(
+                    expected=self.frame_terminator,
+                    size=self.frame_max_bytes,
+                )
+                if not line:
+                    self._emit_idle_event()
+                    continue
+                try:
+                    text = line.decode("ascii", errors="ignore").strip()
+                except Exception:
+                    continue
+                if not text:
+                    self._emit_idle_event()
+                    continue
+                self._note_data_received()
+                log_entry: dict[str, Any] = {"ts": time.time(), "raw": text}
+                parsed = self._parse_line(text)
+                if parsed is None:
+                    log_entry["parsed"] = False
+                else:
+                    _grams, raw_counts, stable_hint = parsed
+                    display_g = self._update(raw_counts, stable_hint)
+                    log_entry.update(
+                        parsed=True,
+                        grams=display_g,
+                        raw_counts=raw_counts,
+                        stable_hint=stable_hint,
+                    )
+                self._append_log(log_entry)
+            except serial.SerialException as exc:
+                self._append_log({"event": f"Serial exception: {exc}", "ts": time.time()})
+                self._reset_serial()
+                time.sleep(backoff)
+                backoff = min(backoff * 2.0, 10.0)
+            except Exception as exc:
+                self._append_log({"event": f"Parse error: {exc}", "ts": time.time()})
+                continue
+
+    def _ensure_serial(self) -> bool:
+        with self._serial_lock:
+            if self._serial and self._serial.is_open:
+                return True
+            try:
+                self._serial = serial.Serial(
+                    self.serial_port,
+                    baudrate=self.baudrate,
+                    timeout=self.timeout,
+                    bytesize=self.bytesize,
+                    parity=self.parity,
+                    stopbits=self.stopbits,
+                    xonxoff=self.xonxoff,
+                    rtscts=self.rtscts,
+                    dsrdtr=self.dsrdtr,
+                )
+                self._serial.reset_input_buffer()
+                if self.set_dtr:
+                    try:
+                        self._serial.dtr = True
+                    except Exception:
+                        pass
+                if self.set_rts:
+                    try:
+                        self._serial.rts = True
+                    except Exception:
+                        pass
+                self._append_log(
+                    {
+                        "event": f"Opened {self.serial_port} @ {self.baudrate} baud",
+                        "ts": time.time(),
+                    }
+                )
+                return True
+            except serial.SerialException as exc:
+                self._serial = None
+                self._append_log({"event": f"Serial open failed: {exc}", "ts": time.time()})
+                return False
+
+    def _reset_serial(self) -> None:
+        with self._serial_lock:
+            if self._serial:
+                try:
+                    self._serial.close()
+                except Exception:
+                    pass
+            self._serial = None
+            self._append_log({"event": "Serial connection closed", "ts": time.time()})
+
+    # ------------------------------------------------------------------
+    def _emit_idle_event(self) -> None:
+        now = time.time()
+        if self._last_data_ts is None:
+            self._last_data_ts = now
+            return
+        if (now - self._last_data_ts) < max(self.timeout, 0.5):
+            return
+        self._append_log(
+            {
+                "event": f"No serial data for {now - self._last_data_ts:.1f}s",
+                "ts": now,
+            }
+        )
+        self._last_data_ts = now
+
+    def _parse_line(self, text: str) -> tuple[float, int, bool | None] | None:
+        """Return (grams, raw_counts, stable_hint) if line parsed; else None."""
+        clean_text = "".join(
+            ch for ch in text if (ch.isprintable() or ch in {"\r", "\n", "\t"})
+        )
+        working_text = clean_text or text
+        tokens = [tok.strip() for tok in self._LINE_SPLIT_RE.split(working_text) if tok.strip()]
+        if not tokens:
+            return None
+
+        stable_hint: bool | None = None
+        for tok in tokens:
+            upper = tok.upper()
+            if upper.startswith("US") or "UNSTABLE" in upper:
+                stable_hint = False
+                break
+            if upper.startswith("ST") or "STABLE" in upper:
+                stable_hint = True
+
+        grams = self._extract_grams(working_text, tokens)
+        if grams is None:
+            return None
+
+        raw_counts = int(round(grams * self.native_counts_per_gram))
+        return grams, raw_counts, stable_hint
+
+    def _extract_grams(self, text: str, tokens: list[str]) -> float | None:
+        """Attempt to extract a numeric weight in grams from the raw text."""
+
+        kg_factor = self.kg_to_grams
+
+        def _apply_unit(value: float, unit: str) -> float:
+            unit = unit.lower()
+            if unit.startswith("kg") or "kilogram" in unit:
+                return value * kg_factor
+            if unit.startswith("lb") or "pound" in unit:
+                return value * 453.59237
+            if unit.startswith("oz") or "ounce" in unit:
+                return value * 28.349523125
+            return value
+
+        # 0) If this is a "Net" line from the verbose printout, only use that value.
+        net_match = self._NET_VALUE_RE.search(text)
+        if net_match:
+            try:
+                value = float(net_match.group(1))
+            except (TypeError, ValueError):
+                pass
+            else:
+                unit = net_match.group(2)
+                if unit:
+                    return _apply_unit(value, unit)
+                fallback_unit = self.net_default_unit
+                if fallback_unit == "auto":
+                    text_upper = text.upper()
+                    if "KG" in text_upper or "KILOGRAM" in text_upper:
+                        fallback_unit = "kg"
+                    elif any(token in text_upper for token in ("LB", "LBS", "POUND", "POUNDS")):
+                        fallback_unit = "lb"
+                    elif any(token in text_upper for token in ("OZ", "OZS", "OUNCE", "OUNCES")):
+                        fallback_unit = "oz"
+                    else:
+                        fallback_unit = "g"
+                return _apply_unit(value, fallback_unit)
+
+        # If the frame includes other verbose ticket fields (Gross, Tare, etc.) but no
+        # usable Net value, ignore it so we do not treat those as live weights.
+        if self._VERBOSE_FIELD_RE.search(text):
+            return None
+
+        # 1) Prefer explicit number+unit pair anywhere in the text.
+        match = self._NUMBER_WITH_UNIT_RE.search(text)
+        if match:
+            try:
+                value = float(match.group(1))
+                unit = match.group(2)
+            except (TypeError, ValueError):
+                pass
+            else:
+                return _apply_unit(value, unit)
+
+        # 2) Look for tokens that embed units (e.g. "1.23Kg", "2lb").
+        for token in tokens:
+            lower = token.lower()
+            for unit in ("kg", "kilogram", "lb", "pound", "oz", "ounce", "g", "gram"):
+                idx = lower.find(unit)
+                if idx == -1:
+                    continue
+                number_part = token[:idx] if idx > 0 else token[idx + len(unit) :]
+                match = self._NUMBER_RE.search(number_part)
+                if not match and idx > 0:
+                    continue
+                if not match and idx == 0:
+                    match = self._NUMBER_RE.search(token[idx + len(unit) :])
+                if not match:
+                    continue
+                try:
+                    value = float(match.group())
+                except ValueError:
+                    continue
+                return _apply_unit(value, unit)
+
+        # 3) If the unit is in its own token, use neighbouring numeric token.
+        upper_tokens = [tok.upper() for tok in tokens]
+        for idx, tok in enumerate(upper_tokens):
+            if tok not in {"KG", "KGS", "KILOGRAM", "KILOGRAMS", "LB", "LBS", "POUND", "POUNDS", "OZ", "OZS", "OUNCE", "OUNCES", "G", "GRAM", "GRAMS"}:
+                continue
+            unit_token = tokens[idx]
+            neighbours = []
+            if idx > 0:
+                neighbours.append(tokens[idx - 1])
+            if idx + 1 < len(tokens):
+                neighbours.append(tokens[idx + 1])
+            for neighbour in neighbours:
+                match = self._NUMBER_RE.search(neighbour)
+                if not match:
+                    continue
+                try:
+                    value = float(match.group())
+                except ValueError:
+                    continue
+                return _apply_unit(value, unit_token)
+
+        # 4) Fall back to the first reasonable numeric token and assume the
+        #    indicator's configured base unit (the B140 streams kilograms when
+        #    no unit is included).
+        default_multiplier = kg_factor
+        if self.net_default_unit == "g":
+            default_multiplier = 1.0
+        elif self.net_default_unit == "lb":
+            default_multiplier = 453.59237
+        elif self.net_default_unit == "oz":
+            default_multiplier = 28.349523125
+
+        upper_tokens = [tok.upper() for tok in tokens]
+        if any(tok in {"G", "GRAM", "GRAMS"} for tok in upper_tokens):
+            default_multiplier = 1.0
+        elif any(tok in {"LB", "LBS", "POUND", "POUNDS"} for tok in upper_tokens):
+            default_multiplier = 453.59237
+        elif any(tok in {"OZ", "OZS", "OUNCE", "OUNCES"} for tok in upper_tokens):
+            default_multiplier = 28.349523125
+
+        for token in tokens:
+            match = self._NUMBER_RE.search(token)
+            if not match:
+                continue
+            try:
+                value = float(match.group())
+            except ValueError:
+                continue
+            # Skip obviously non-weight numbers (timestamps etc.).
+            if abs(value) > 1e6:
+                continue
+            multiplier = default_multiplier
+            if self.net_default_unit == "auto" and default_multiplier == kg_factor:
+                if abs(value) >= 10:
+                    multiplier = 1.0
+                else:
+                    multiplier = kg_factor
+            return value * multiplier
+
+        return None
+
+    def _update(self, raw_counts: int, stable_hint: bool | None) -> float:
+        with self._state_lock:
+            zero_offset = self._zero_offset
+            scale_factor = self._scale_factor
+            scale_sign = self._scale_sign
+
+        grams = scale_sign * (raw_counts - zero_offset) / scale_factor
+
+        self.window.append(grams)
+        med = median(self.window) if self.window else grams
+        self.ema = med if self.ema is None else (self.alpha * med + (1 - self.alpha) * self.ema)
+
+        computed_stable = (
+            len(self.window) >= max(5, self.window.maxlen // 2)
+            and pstdev(self.window) < 0.05
+        )
+        stable = stable_hint if stable_hint is not None else computed_stable
+
+        precision = self.display_precision if self.display_precision > 0 else 0.1
+        g_display = round(round(grams / precision) * precision, 3)
+
+        with self._state_lock:
+            self.latest = dict(g=g_display, stable=stable, raw=int(raw_counts))
+            self._last_raw_counts = int(raw_counts)
+            self._last_update_ts = time.time()
+            self._last_data_ts = self._last_update_ts
+
+        return g_display
+
+    def _append_log(self, entry: dict[str, Any]) -> None:
+        item = dict(entry)
+        item.setdefault("ts", time.time())
+        with self._state_lock:
+            self._raw_log.append(item)
+
+    # ------------------------------------------------------------------
+    def _note_data_received(self) -> None:
+        now = time.time()
+        with self._state_lock:
+            self._last_data_ts = now
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _coerce_bytesize(value: str | None) -> int:
+        if not value:
+            return serial.EIGHTBITS
+        value = value.strip()
+        mapping = {
+            "5": serial.FIVEBITS,
+            "6": serial.SIXBITS,
+            "7": serial.SEVENBITS,
+            "8": serial.EIGHTBITS,
+        }
+        return mapping.get(value, serial.EIGHTBITS)
+
+    @staticmethod
+    def _coerce_parity(value: str | None) -> str:
+        if not value:
+            return serial.PARITY_NONE
+        value = value.strip().lower()
+        mapping = {
+            "n": serial.PARITY_NONE,
+            "none": serial.PARITY_NONE,
+            "e": serial.PARITY_EVEN,
+            "even": serial.PARITY_EVEN,
+            "o": serial.PARITY_ODD,
+            "odd": serial.PARITY_ODD,
+            "m": serial.PARITY_MARK,
+            "mark": serial.PARITY_MARK,
+            "s": serial.PARITY_SPACE,
+            "space": serial.PARITY_SPACE,
+        }
+        return mapping.get(value, serial.PARITY_NONE)
+
+    @staticmethod
+    def _coerce_stopbits(value: str | None) -> float:
+        if not value:
+            return serial.STOPBITS_ONE
+        value = value.strip().lower()
+        mapping = {
+            "1": serial.STOPBITS_ONE,
+            "1.5": serial.STOPBITS_ONE_POINT_FIVE,
+            "1.5bits": serial.STOPBITS_ONE_POINT_FIVE,
+            "2": serial.STOPBITS_TWO,
+        }
+        return mapping.get(value, serial.STOPBITS_ONE)
+
+    @staticmethod
+    def _coerce_terminator(value: str) -> bytes:
+        decoded = value.encode("utf-8", errors="ignore").decode("unicode_escape")
+        if not decoded:
+            decoded = "\r"
+        return decoded.encode("utf-8", errors="ignore")
+
+    @staticmethod
+    def _coerce_net_unit(value: str | None) -> str:
+        if not value:
+            return "auto"
+        value = value.strip().lower()
+        mapping = {
+            "auto": "auto",
+            "kg": "kg",
+            "kilogram": "kg",
+            "kilograms": "kg",
+            "g": "g",
+            "gram": "g",
+            "grams": "g",
+            "lb": "lb",
+            "lbs": "lb",
+            "pound": "lb",
+            "pounds": "lb",
+            "oz": "oz",
+            "ozs": "oz",
+            "ounce": "oz",
+            "ounces": "oz",
+        }
+        return mapping.get(value, "auto")

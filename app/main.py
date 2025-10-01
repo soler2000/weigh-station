@@ -1,12 +1,12 @@
 import asyncio, csv, io, os
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 from pathlib import Path
 from datetime import date, datetime, timedelta, time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request, Path as FPath
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, select, func, case
+from sqlalchemy import create_engine, select, func, case, or_, cast, String
 from sqlalchemy.orm import sessionmaker
 from app.models import Base, Variant, Calibration, WeighEvent
 from app.hx711_reader import ScaleReader, ADCNotReadyError
@@ -24,8 +24,79 @@ Session = sessionmaker(engine, expire_on_commit=False, future=True)
 Base.metadata.create_all(engine)
 
 
+def _ensure_schema_migrations() -> None:
+    """Perform lightweight, idempotent schema migrations for SQLite deployments."""
+
+    weigh_event_columns = {
+        "moulding_serial": "TEXT",
+        "contract": "TEXT",
+        "order_number": "TEXT",
+        "colour": "TEXT",
+        "notes": "TEXT",
+    }
+
+    with engine.begin() as conn:
+        existing_weigh_event_cols = {
+            row[1]
+            for row in conn.exec_driver_sql("PRAGMA table_info(weigh_events)").fetchall()
+        }
+        for column, ddl in weigh_event_columns.items():
+            if column not in existing_weigh_event_cols:
+                conn.exec_driver_sql(
+                    f"ALTER TABLE weigh_events ADD COLUMN {column} {ddl}"
+                )
+
+        variant_columns = {
+            row[1]
+            for row in conn.exec_driver_sql("PRAGMA table_info(variants)").fetchall()
+        }
+        if "enabled" not in variant_columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE variants ADD COLUMN enabled BOOLEAN DEFAULT 1"
+            )
+
+
+_ensure_schema_migrations()
+
+
 app = FastAPI(title="Weigh Station")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+def _pass_condition_expr():
+    normalized = func.lower(func.trim(cast(WeighEvent.in_range, String)))
+    return or_(
+        WeighEvent.in_range.is_(True),
+        WeighEvent.in_range == 1,
+        WeighEvent.in_range == "1",
+        WeighEvent.in_range == "true",
+        WeighEvent.in_range == "TRUE",
+        WeighEvent.in_range == "True",
+        normalized == "true",
+        normalized == "t",
+        normalized == "pass",
+        normalized == "p",
+        normalized == "yes",
+        normalized == "y",
+    )
+
+
+def _fail_condition_expr():
+    normalized = func.lower(func.trim(cast(WeighEvent.in_range, String)))
+    return or_(
+        WeighEvent.in_range.is_(False),
+        WeighEvent.in_range == 0,
+        WeighEvent.in_range == "0",
+        WeighEvent.in_range == "false",
+        WeighEvent.in_range == "FALSE",
+        WeighEvent.in_range == "False",
+        normalized == "false",
+        normalized == "f",
+        normalized == "fail",
+        normalized == "failed",
+        normalized == "no",
+        normalized == "n",
+    )
 # --- Pydantic DTOs
 class VariantIn(BaseModel):
     name: str = Field(..., max_length=64)
@@ -39,8 +110,13 @@ class WeighEventOut(BaseModel):
     id: int
     ts: str
     variant_id: int
+    moulding_serial: Optional[str] = None
     serial: str
+    contract: Optional[str] = None
+    order_number: Optional[str] = None
     operator: Optional[str] = None
+    colour: Optional[str] = None
+    notes: Optional[str] = None
     gross_g: float
     net_g: float
     in_range: bool
@@ -48,10 +124,20 @@ class WeighEventOut(BaseModel):
 reader = ScaleReader()  # pin names via env: DATA_PIN, CLOCK_PIN
 with Session() as s:
     calib = s.execute(select(Calibration).order_by(Calibration.id.desc())).scalar()
+    native_scale = reader.native_counts_per_gram
     if calib:
-        reader.set_calibration(calib.zero_offset, calib.scale_factor)
+        stored_scale = float(calib.scale_factor or 0)
+        stored_zero = int(calib.zero_offset or 0)
+        if stored_scale <= 0:
+            reader.set_calibration(0, native_scale)
+        else:
+            ratio = stored_scale / native_scale if native_scale else 1.0
+            if 0.5 <= ratio <= 2.0:
+                reader.set_calibration(stored_zero, stored_scale)
+            else:
+                reader.set_calibration(0, native_scale)
     else:
-        reader.set_calibration(0, 1.0)
+        reader.set_calibration(0, native_scale)
 reader.start(hz=10)
 # --- Seed 4 variants if empty (placeholders; adjust in UI)
 with Session() as s:
@@ -78,12 +164,71 @@ def production_output_page():
 @app.get("/export", response_class=HTMLResponse)
 def export_page():
     return (STATIC_DIR / "export.html").read_text(encoding="utf-8")
+
+
+@app.get("/serial-log", response_class=HTMLResponse)
+def serial_log_page():
+    return (STATIC_DIR / "serial-log.html").read_text(encoding="utf-8")
 # --- Variant CRUD
 @app.get("/api/variants", response_model=List[VariantOut])
 def list_variants():
     with Session() as s:
         vs = s.query(Variant).order_by(Variant.id.asc()).all()
         return [VariantOut(id=v.id, name=v.name, min_g=v.min_g, max_g=v.max_g, unit=v.unit, enabled=v.enabled) for v in vs]
+
+
+def _collect_production_variants(session) -> List[dict]:
+    """Return configured variants plus any orphaned historical IDs."""
+
+    configured: List[Tuple[int, Optional[str], Optional[bool]]] = (
+        session.query(Variant.id, Variant.name, Variant.enabled)
+        .order_by(func.lower(Variant.name).asc(), Variant.id.asc())
+        .all()
+    )
+
+    historical_ids: Set[int] = {
+        int(vid)
+        for (vid,) in (
+            session.query(WeighEvent.variant_id)
+            .filter(WeighEvent.variant_id.isnot(None))
+            .distinct()
+        )
+        if vid is not None
+    }
+
+    items: List[dict] = []
+    seen: Set[int] = set()
+
+    for vid, name, enabled in configured:
+        vid_int = int(vid)
+        seen.add(vid_int)
+        historical_ids.discard(vid_int)
+        label = (name or "").strip() or f"Variant {vid_int}"
+        if enabled is False:
+            label = f"{label} (disabled)"
+        items.append({"id": vid_int, "name": label})
+
+    for vid in sorted(historical_ids):
+        if vid in seen:
+            continue
+        items.append({"id": vid, "name": f"Variant {vid}"})
+        seen.add(vid)
+
+    return items
+
+
+@app.get("/api/production/variants")
+def production_variants():
+    """Return every variant referenced by production output.
+
+    The caller expects a simple list of `{id, name}` dictionaries. We prefer the
+    configured variant name when available but we still surface orphaned
+    `variant_id` values that only exist in historical weigh events so operators
+    can continue to filter their legacy data.
+    """
+
+    with Session() as s:
+        return {"items": _collect_production_variants(s)}
 @app.post("/api/variants", response_model=VariantOut)
 def create_variant(v: VariantIn):
     with Session() as s:
@@ -149,11 +294,35 @@ async def ws_weight(ws: WebSocket):
         await ws.close()
 # --- Commit a weighing (now enforces non-blank + unique serial)
 @app.post("/api/weigh/commit", response_model=WeighEventOut)
-def commit(variant_id: int, serial: str = Query(...), operator: Optional[str] = Query(default=None)):
+def commit(
+    variant_id: int,
+    serial: str = Query(...),
+    operator: Optional[str] = Query(default=None),
+    moulding_serial: Optional[str] = Query(default=None),
+    contract: Optional[str] = Query(default=None),
+    order_number: Optional[str] = Query(default=None),
+    colour: Optional[str] = Query(default=None),
+    notes: Optional[str] = Query(default=None),
+):
     serial = (serial or "").strip()
     if not serial:
         raise HTTPException(400, "Serial cannot be blank.")
     operator_clean = (operator or "").strip() or None
+
+    def _clean(value: Optional[str], *, preserve_newlines: bool = False) -> Optional[str]:
+        if value is None:
+            return None
+        if preserve_newlines:
+            cleaned = value.strip()
+        else:
+            cleaned = value.strip()
+        return cleaned or None
+
+    moulding_clean = _clean(moulding_serial)
+    contract_clean = _clean(contract)
+    order_clean = _clean(order_number)
+    colour_clean = _clean(colour)
+    notes_clean = _clean(notes, preserve_newlines=True)
     with Session() as s:
         # Enforce global uniqueness of serial across all variants
         dup = s.query(WeighEvent).filter(WeighEvent.serial == serial).first()
@@ -169,8 +338,13 @@ def commit(variant_id: int, serial: str = Query(...), operator: Optional[str] = 
         raw_avg = int(latest.get("raw", 0))
         evt = WeighEvent(
             variant_id=variant_id,
+            moulding_serial=moulding_clean,
             serial=serial,
+            contract=contract_clean,
+            order_number=order_clean,
             operator=operator_clean,
+            colour=colour_clean,
+            notes=notes_clean,
             gross_g=g,
             net_g=net_g,
             in_range=in_range,
@@ -181,24 +355,42 @@ def commit(variant_id: int, serial: str = Query(...), operator: Optional[str] = 
             id=evt.id,
             ts=evt.ts.isoformat(),
             variant_id=evt.variant_id,
+            moulding_serial=evt.moulding_serial,
             serial=evt.serial,
+            contract=evt.contract,
+            order_number=evt.order_number,
             operator=evt.operator,
+            colour=evt.colour,
+            notes=evt.notes,
             gross_g=evt.gross_g,
             net_g=evt.net_g,
             in_range=evt.in_range,
         )
 # --- Stats (pass/fail counters, optional by variant)
 @app.get("/api/stats")
-def stats(variant_id: Optional[int] = None):
-    today = datetime.utcnow().date()
-    start_dt = datetime.combine(today, time.min)
-    end_dt = start_dt + timedelta(days=1)
-    pass_case = func.sum(case((WeighEvent.in_range.is_(True), 1), else_=0))
-    fail_case = func.sum(case((WeighEvent.in_range.is_(False), 1), else_=0))
+def stats(
+    variant_id: Optional[int] = None,
+    moulding_serial: Optional[str] = Query(default=None),
+    tz_offset: int = Query(0, description="Minutes to add to local time to reach UTC"),
+):
+    offset_minutes = int(tz_offset or 0)
+    offset_delta = timedelta(minutes=offset_minutes)
+
+    now_local = datetime.utcnow() - offset_delta
+    today_local = now_local.date()
+    start_local = datetime.combine(today_local, time.min)
+    end_local = start_local + timedelta(days=1)
+    start_dt = start_local + offset_delta
+    end_dt = end_local + offset_delta
+    pass_case = func.sum(case((_pass_condition_expr(), 1), else_=0))
+    fail_case = func.sum(case((or_(_fail_condition_expr(), WeighEvent.in_range.is_(None)), 1), else_=0))
     with Session() as s:
         filters = [WeighEvent.ts >= start_dt, WeighEvent.ts < end_dt]
         if variant_id:
             filters.append(WeighEvent.variant_id == variant_id)
+        serial_filter = (moulding_serial or "").strip()
+        if serial_filter:
+            filters.append(WeighEvent.moulding_serial == serial_filter)
         row = (
             s.query(
                 pass_case.label("pass_count"),
@@ -236,6 +428,7 @@ def production_output(
     start: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     variant_id: Optional[int] = Query(None, ge=1),
+    tz_offset: int = Query(0, description="Minutes to add to local time to reach UTC"),
 ):
     interval = (interval or "day").lower()
     if interval not in {"day", "hour"}:
@@ -251,16 +444,21 @@ def production_output(
 
     start_date = parse_iso_date(start, "start")
     end_date = parse_iso_date(end, "end")
-    today = datetime.utcnow().date()
+    offset_minutes = int(tz_offset or 0)
+    offset_delta = timedelta(minutes=offset_minutes)
+
+    today_local = (datetime.utcnow() - offset_delta).date()
     if end_date is None:
-        end_date = today
+        end_date = today_local
     if start_date is None:
-        start_date = end_date - timedelta(days=6)
+        start_date = end_date
     if start_date > end_date:
         raise HTTPException(400, "start must be on or before end")
 
-    start_dt = datetime.combine(start_date, time.min)
-    end_dt = datetime.combine(end_date + timedelta(days=1), time.min)
+    start_local = datetime.combine(start_date, time.min)
+    end_local = datetime.combine(end_date + timedelta(days=1), time.min)
+    start_dt = start_local + offset_delta
+    end_dt = end_local + offset_delta
 
     bucket_labels: List[str] = []
     if interval == "day":
@@ -272,52 +470,134 @@ def production_output(
         while current <= end_date:
             bucket_labels.append(current.isoformat())
             current += timedelta(days=1)
-        bucket_format = "%Y-%m-%d"
     else:
         max_hours = 31 * 24  # ~1 month of hourly buckets
-        total_hours = int((end_dt - start_dt).total_seconds() // 3600)
+        total_hours = int((end_local - start_local).total_seconds() // 3600)
         if total_hours > max_hours:
             raise HTTPException(400, f"Date range too large for hourly view (max {max_hours} hours).")
-        current_dt = start_dt
-        bucket_format = "%Y-%m-%d %H:00"
-        while current_dt < end_dt:
-            bucket_labels.append(current_dt.strftime(bucket_format))
+        current_dt = start_local
+        while current_dt < end_local:
+            bucket_labels.append(current_dt.strftime("%Y-%m-%d %H:00"))
             current_dt += timedelta(hours=1)
 
-    bucket_col = func.strftime(bucket_format, WeighEvent.ts)
-    pass_sum = func.sum(case((WeighEvent.in_range.is_(True), 1), else_=0))
-    fail_sum = func.sum(case((WeighEvent.in_range.is_(False), 1), else_=0))
+    def _bucket_label(ts_local: datetime) -> str:
+        if interval == "day":
+            return ts_local.strftime("%Y-%m-%d")
+        aligned = ts_local.replace(minute=0, second=0, microsecond=0)
+        return aligned.strftime("%Y-%m-%d %H:00")
+
+    def _classify(value: Optional[object]) -> Optional[bool]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            if value == 1:
+                return True
+            if value == 0:
+                return False
+        if isinstance(value, str):
+            token = value.strip().lower()
+            if token in {"1", "true", "t", "pass", "p", "yes", "y"}:
+                return True
+            if token in {"0", "false", "f", "fail", "failed", "no", "n"}:
+                return False
+        return None
 
     with Session() as s:
         variant_meta = None
+        variant_options = _collect_production_variants(s)
+        variants_by_id = {
+            row.id: (row.name or "").strip() or f"Variant {row.id}"
+            for row in s.query(Variant).all()
+        }
+
         if variant_id is not None:
             variant = s.get(Variant, int(variant_id))
             if not variant:
                 raise HTTPException(404, "Variant not found")
             variant_meta = {"id": variant.id, "name": variant.name}
 
-        q = s.query(
-            bucket_col.label("bucket"),
-            pass_sum.label("pass_count"),
-            fail_sum.label("fail_count"),
-        ).filter(WeighEvent.ts >= start_dt, WeighEvent.ts < end_dt)
+        q = (
+            s.query(WeighEvent)
+            .filter(WeighEvent.ts >= start_dt, WeighEvent.ts < end_dt)
+            .order_by(WeighEvent.ts.asc())
+        )
 
         if variant_id is not None:
             q = q.filter(WeighEvent.variant_id == variant_id)
 
-        rows = q.group_by(bucket_col).order_by(bucket_col).all()
+        rows: List[WeighEvent] = q.all()
 
-    bucket_map = {row.bucket: row for row in rows}
-    data = []
+    bucket_totals: Dict[str, Dict[str, int]] = {
+        label: {"pass": 0, "fail": 0, "total": 0} for label in bucket_labels
+    }
+
     total_pass = 0
     total_fail = 0
+    total_count = 0
+
+    event_limit = 500
+    events_payload: List[dict] = []
+    events_truncated = False
+
+    for idx, row in enumerate(rows):
+        local_ts = row.ts - offset_delta
+        label = _bucket_label(local_ts)
+        bucket = bucket_totals.setdefault(label, {"pass": 0, "fail": 0, "total": 0})
+        bucket["total"] += 1
+        status = _classify(row.in_range)
+        if status is True:
+            bucket["pass"] += 1
+        elif status is False:
+            bucket["fail"] += 1
+
+        if idx < event_limit:
+            events_payload.append(
+                {
+                    "ts": local_ts.isoformat(),
+                    "variant_id": row.variant_id,
+                    "variant": variants_by_id.get(
+                        row.variant_id, f"Variant {row.variant_id}" if row.variant_id else "—"
+                    ),
+                    "serial": row.serial,
+                    "moulding_serial": row.moulding_serial,
+                    "contract": row.contract,
+                    "order_number": row.order_number,
+                    "operator": row.operator,
+                    "colour": row.colour,
+                    "notes": row.notes,
+                    "net_g": row.net_g,
+                    "status": "pass" if status is True else "fail" if status is False else None,
+                }
+            )
+        else:
+            events_truncated = True
+
+    bucket_data: List[dict] = []
+
     for label in bucket_labels:
-        row = bucket_map.get(label)
-        p = int(row.pass_count) if row and row.pass_count is not None else 0
-        f = int(row.fail_count) if row and row.fail_count is not None else 0
-        data.append({"label": label, "pass": p, "fail": f})
-        total_pass += p
-        total_fail += f
+        bucket = bucket_totals.get(label) or {"pass": 0, "fail": 0, "total": 0}
+        total = int(bucket.get("total", 0) or 0)
+        passed = int(bucket.get("pass", 0) or 0)
+        # Ensure unknown results still surface as fails so totals match the row count
+        explicit_fail = int(bucket.get("fail", 0) or 0)
+        fail = max(explicit_fail, total - passed)
+        rate = (passed / total) if total else None
+        bucket_data.append(
+            {
+                "label": label,
+                "pass": passed,
+                "fail": fail,
+                "total": total,
+                "pass_rate": rate,
+            }
+        )
+        total_pass += passed
+        total_fail += fail
+        total_count += total
+
+    overall_rate = (total_pass / total_count) if total_count else None
 
     return {
         "interval": interval,
@@ -325,12 +605,18 @@ def production_output(
         "end": end_date.isoformat(),
         "bucket_count": len(bucket_labels),
         "variant": variant_meta,
-        "buckets": data,
+        "variants": variant_options,
+        "buckets": bucket_data,
         "totals": {
             "pass": total_pass,
             "fail": total_fail,
-            "total": total_pass + total_fail,
+            "total": total_count or (total_pass + total_fail),
+            "pass_rate": overall_rate,
         },
+        "query_count": len(rows),
+        "events": events_payload,
+        "events_truncated": events_truncated,
+        "events_limit": event_limit,
     }
 # --- CSV export
 @app.get("/export.csv")
@@ -363,7 +649,23 @@ def export_csv(
         raise HTTPException(400, '"to" must be on or after "from".')
     output = io.StringIO()
     w = csv.writer(output)
-    w.writerow(["ts", "variant_id", "serial", "operator", "gross_g", "net_g", "in_range", "raw_avg"])
+    w.writerow(
+        [
+            "ts",
+            "variant_id",
+            "moulding_serial",
+            "serial",
+            "contract",
+            "order_number",
+            "operator",
+            "colour",
+            "notes",
+            "gross_g",
+            "net_g",
+            "in_range",
+            "raw_avg",
+        ]
+    )
     with Session() as s:
         q = s.query(WeighEvent)
         if variant: q = q.filter(WeighEvent.variant_id == variant)
@@ -371,16 +673,23 @@ def export_csv(
         if start_dt: q = q.filter(WeighEvent.ts >= start_dt)
         if end_dt: q = q.filter(WeighEvent.ts <= end_dt)
         for r in q.order_by(WeighEvent.ts.asc()).all():
-            w.writerow([
-                r.ts.isoformat(),
-                r.variant_id,
-                r.serial,
-                r.operator or "",
-                r.gross_g,
-                r.net_g,
-                r.in_range,
-                r.raw_avg,
-            ])
+            w.writerow(
+                [
+                    r.ts.isoformat(),
+                    r.variant_id,
+                    r.moulding_serial or "",
+                    r.serial,
+                    r.contract or "",
+                    r.order_number or "",
+                    r.operator or "",
+                    r.colour or "",
+                    (r.notes or "").replace("\r", " ").replace("\n", " "),
+                    r.gross_g,
+                    r.net_g,
+                    r.in_range,
+                    r.raw_avg,
+                ]
+            )
     output.seek(0)
     return StreamingResponse(output, media_type="text/csv",
                              headers={"Content-Disposition": "attachment; filename=weigh_export.csv"})
@@ -388,6 +697,11 @@ def export_csv(
 @app.get("/api/debug/latest")
 def debug_latest():
     return reader.read_latest()
+
+
+@app.get("/api/scale/serial-log")
+def api_serial_log(limit: int = Query(200, ge=1, le=2000)):
+    return {"lines": reader.get_serial_log(limit=limit)}
 # --- Health
 @app.get("/api/health")
 def health():
@@ -430,13 +744,22 @@ def _ncdf(x: float) -> float:
     # standard normal CDF
     return 0.5 * (1.0 + erf(x / sqrt(2.0)))
 @app.get("/api/stats/summary")
-def stats_summary(variant_id: int, bins: int = 20, frm: Optional[str] = None, to: Optional[str] = None):
+def stats_summary(
+    variant_id: int,
+    bins: int = 20,
+    frm: Optional[str] = None,
+    to: Optional[str] = None,
+    moulding_serial: Optional[str] = None,
+):
     # fetch variant & measurements
     with Session() as s:
         v = s.get(Variant, variant_id)
         if not v:
             raise HTTPException(404, "Variant not found")
         q = s.query(WeighEvent).filter(WeighEvent.variant_id == variant_id)
+        serial_filter = (moulding_serial or "").strip()
+        if serial_filter:
+            q = q.filter(WeighEvent.moulding_serial == serial_filter)
         # (MVP) frm/to are placeholders; extend to parse ISO dates if needed
         rows = q.order_by(WeighEvent.ts.asc()).all()
         xs = [r.net_g for r in rows]
@@ -487,6 +810,7 @@ def stats_distribution(
     variant_id: int | None = Query(None),
     frm: str | None = Query(None),
     to: str | None = Query(None),
+    moulding_serial: str | None = Query(None),
     bins: int = Query(20, ge=5, le=200),
 ):
     # Need a single variant for Cp/Cpk (LSL/USL)
@@ -501,6 +825,9 @@ def stats_distribution(
             q = q.filter(WeighEvent.ts >= _parse_day(frm))
         if to:
             q = q.filter(WeighEvent.ts < (_parse_day(to) + timedelta(days=1)))
+        serial_filter = (moulding_serial or "").strip()
+        if serial_filter:
+            q = q.filter(WeighEvent.moulding_serial == serial_filter)
         rows = q.order_by(WeighEvent.ts.asc()).all()
         vals = [float(r.net_g) for r in rows]
         n = len(vals)

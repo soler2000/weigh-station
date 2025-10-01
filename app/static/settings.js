@@ -45,7 +45,9 @@ function bindRowHandlers() {
   });
 }
 
-function escapeHtml(s){ return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function escapeHtml(s){
+  return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
 
 document.getElementById('v-add').onclick = async () => {
   const name = document.getElementById('v-name').value.trim();
@@ -64,17 +66,6 @@ document.getElementById('v-add').onclick = async () => {
   } else alert('Add failed');
 };
 
-document.getElementById('btn-tare').onclick = async () => {
-  const res = await fetch('/api/calibrate/tare', { method:'POST' });
-  document.getElementById('calib-msg').textContent = res.ok ? 'Tare saved.' : 'Tare failed.';
-};
-document.getElementById('btn-known').onclick = async () => {
-  const k = parseFloat(document.getElementById('known').value);
-  if (isNaN(k) || k<=0) return alert('Enter known mass in grams');
-  const res = await fetch(`/api/calibrate/with-known?known_g=${encodeURIComponent(k)}`, { method:'POST' });
-  document.getElementById('calib-msg').textContent = res.ok ? 'Scale factor saved.' : 'Calibration failed.';
-};
-
 document.getElementById('btn-del-events').onclick = async () => {
   const token = prompt('Type DELETE to remove ALL weigh logs');
   if (token !== 'DELETE') return;
@@ -83,7 +74,7 @@ document.getElementById('btn-del-events').onclick = async () => {
 };
 
 document.getElementById('btn-factory-reset').onclick = async () => {
-  const token = prompt('Type RESET to factory reset (logs + variants + calibration). This cannot be undone.');
+  const token = prompt('Type RESET to factory reset (logs + variants). This cannot be undone.');
   if (token !== 'RESET') return;
   const res = await fetch('/api/admin/factory-reset?confirm=RESET', { method: 'POST' });
   if (res.ok) {

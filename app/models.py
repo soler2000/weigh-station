@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, Float, Boolean, ForeignKey, DateTime
+from sqlalchemy import String, Integer, Float, Boolean, ForeignKey, DateTime, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
@@ -29,8 +29,13 @@ class WeighEvent(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"))
+    moulding_serial: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     serial: Mapped[str] = mapped_column(String(64))
+    contract: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    order_number: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     operator: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    colour: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     gross_g: Mapped[float] = mapped_column(Float)
     net_g: Mapped[float] = mapped_column(Float)
     in_range: Mapped[bool] = mapped_column(Boolean)
