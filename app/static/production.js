@@ -255,7 +255,12 @@ async function refresh() {
     failEl.textContent = formatNum(failTotal);
     totalEl.textContent = formatNum(total);
 
-    const hasValues = buckets.some(b => (Number(b.pass) || 0) + (Number(b.fail) || 0));
+    const hasValues = buckets.some(b => {
+      const passVal = Number(b.pass) || 0;
+      const failVal = Number(b.fail) || 0;
+      const totalVal = Number(b.total) || 0;
+      return passVal + failVal > 0 || totalVal > 0;
+    });
     emptyState.hidden = hasValues;
     if (!hasValues) {
       emptyState.textContent = 'No production results for the selected filters.';

@@ -6,7 +6,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Quer
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, select, func, case, or_
+from sqlalchemy import create_engine, select, func, case, or_, cast, String
 from sqlalchemy.orm import sessionmaker
 from app.models import Base, Variant, Calibration, WeighEvent
 from app.hx711_reader import ScaleReader, ADCNotReadyError
@@ -55,6 +55,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 def _pass_condition_expr():
+    normalized = func.lower(func.trim(cast(WeighEvent.in_range, String)))
     return or_(
         WeighEvent.in_range.is_(True),
         WeighEvent.in_range == 1,
@@ -62,10 +63,17 @@ def _pass_condition_expr():
         WeighEvent.in_range == "true",
         WeighEvent.in_range == "TRUE",
         WeighEvent.in_range == "True",
+        normalized == "true",
+        normalized == "t",
+        normalized == "pass",
+        normalized == "p",
+        normalized == "yes",
+        normalized == "y",
     )
 
 
 def _fail_condition_expr():
+    normalized = func.lower(func.trim(cast(WeighEvent.in_range, String)))
     return or_(
         WeighEvent.in_range.is_(False),
         WeighEvent.in_range == 0,
@@ -73,6 +81,12 @@ def _fail_condition_expr():
         WeighEvent.in_range == "false",
         WeighEvent.in_range == "FALSE",
         WeighEvent.in_range == "False",
+        normalized == "false",
+        normalized == "f",
+        normalized == "fail",
+        normalized == "failed",
+        normalized == "no",
+        normalized == "n",
     )
 # --- Pydantic DTOs
 class VariantIn(BaseModel):
@@ -158,15 +172,37 @@ def list_variants():
 def production_variants():
     with Session() as s:
         rows = (
-            s.query(Variant.id, Variant.name)
-            .order_by(Variant.name.asc())
+            s.query(Variant.id, Variant.name, Variant.enabled)
+            .order_by(Variant.name.asc(), Variant.id.asc())
             .all()
         )
+        fallback_variants = []
+        if not rows:
+            fallback_variants = (
+                s.query(WeighEvent.variant_id)
+                .filter(WeighEvent.variant_id.isnot(None))
+                .distinct()
+                .order_by(WeighEvent.variant_id.asc())
+                .all()
+            )
+
     items = []
+    seen: Set[int] = set()
     for row in rows:
-        vid = row[0]
+        vid = int(row[0])
+        seen.add(vid)
         label = (row[1] or "").strip() or f"Variant {vid}"
-        items.append({"id": vid, "name": label})
+        suffix = " (disabled)" if row[2] is False else ""
+        items.append({"id": vid, "name": f"{label}{suffix}" if suffix else label})
+
+    for (vid,) in fallback_variants:
+        if vid is None:
+            continue
+        vid = int(vid)
+        if vid in seen:
+            continue
+        items.append({"id": vid, "name": f"Variant {vid}"})
+
     return {"items": items}
 @app.post("/api/variants", response_model=VariantOut)
 def create_variant(v: VariantIn):
@@ -412,7 +448,6 @@ def production_output(
     pass_condition = _pass_condition_expr()
     fail_condition = _fail_condition_expr()
     pass_sum = func.sum(case((pass_condition, 1), else_=0))
-    fail_sum = func.sum(case((or_(fail_condition, WeighEvent.in_range.is_(None)), 1), else_=0))
     total_sum = func.count(WeighEvent.id)
 
     with Session() as s:
@@ -426,7 +461,6 @@ def production_output(
         q = s.query(
             bucket_col.label("bucket"),
             pass_sum.label("pass_count"),
-            fail_sum.label("fail_count"),
             total_sum.label("total_count"),
         ).filter(WeighEvent.ts >= start_dt, WeighEvent.ts < end_dt)
 
@@ -443,8 +477,8 @@ def production_output(
     for label in bucket_labels:
         row = bucket_map.get(label)
         p = int(row.pass_count) if row and row.pass_count is not None else 0
-        f = int(row.fail_count) if row and row.fail_count is not None else 0
-        t = int(row.total_count) if row and row.total_count is not None else p + f
+        t = int(row.total_count) if row and row.total_count is not None else p
+        f = max(t - p, 0)
         data.append({"label": label, "pass": p, "fail": f, "total": t})
         total_pass += p
         total_fail += f
