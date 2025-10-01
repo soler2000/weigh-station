@@ -27,7 +27,7 @@ Base.metadata.create_all(engine)
 def _ensure_schema_migrations() -> None:
     """Perform lightweight, idempotent schema migrations for SQLite deployments."""
 
-    required_columns = {
+    weigh_event_columns = {
         "moulding_serial": "TEXT",
         "contract": "TEXT",
         "order_number": "TEXT",
@@ -36,15 +36,24 @@ def _ensure_schema_migrations() -> None:
     }
 
     with engine.begin() as conn:
-        existing = {
+        existing_weigh_event_cols = {
             row[1]
             for row in conn.exec_driver_sql("PRAGMA table_info(weigh_events)").fetchall()
         }
-        for column, ddl in required_columns.items():
-            if column not in existing:
+        for column, ddl in weigh_event_columns.items():
+            if column not in existing_weigh_event_cols:
                 conn.exec_driver_sql(
                     f"ALTER TABLE weigh_events ADD COLUMN {column} {ddl}"
                 )
+
+        variant_columns = {
+            row[1]
+            for row in conn.exec_driver_sql("PRAGMA table_info(variants)").fetchall()
+        }
+        if "enabled" not in variant_columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE variants ADD COLUMN enabled BOOLEAN DEFAULT 1"
+            )
 
 
 _ensure_schema_migrations()
@@ -415,7 +424,7 @@ def production_output(
     if end_date is None:
         end_date = today
     if start_date is None:
-        start_date = end_date - timedelta(days=6)
+        start_date = end_date
     if start_date > end_date:
         raise HTTPException(400, "start must be on or before end")
 

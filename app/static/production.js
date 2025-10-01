@@ -79,9 +79,7 @@ function setDefaultRange() {
   if (!startInput || !endInput) return;
   const now = new Date();
   const end = now.toISOString().slice(0, 10);
-  const startDate = new Date(now.getTime() - 6 * 86400000);
-  const start = startDate.toISOString().slice(0, 10);
-  startInput.value = start;
+  startInput.value = end;
   endInput.value = end;
 }
 
