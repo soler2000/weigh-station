@@ -1,5 +1,5 @@
 import asyncio, csv, io, os
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Tuple
 from pathlib import Path
 from datetime import date, datetime, timedelta, time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request, Path as FPath
@@ -179,35 +179,44 @@ def list_variants():
 
 @app.get("/api/production/variants")
 def production_variants():
+    """Return every variant referenced by production output.
+
+    The caller expects a simple list of `{id, name}` dictionaries. We prefer the
+    configured variant name when available but we still surface orphaned
+    `variant_id` values that only exist in historical weigh events so operators
+    can continue to filter their legacy data.
+    """
+
     with Session() as s:
-        rows = (
+        configured: List[Tuple[int, Optional[str], Optional[bool]]] = (
             s.query(Variant.id, Variant.name, Variant.enabled)
-            .order_by(Variant.name.asc(), Variant.id.asc())
+            .order_by(func.lower(Variant.name).asc(), Variant.id.asc())
             .all()
         )
 
-        event_variant_ids = (
-            s.query(WeighEvent.variant_id)
-            .filter(WeighEvent.variant_id.isnot(None))
-            .distinct()
-            .order_by(WeighEvent.variant_id.asc())
-            .all()
-        )
+        historical_ids: Set[int] = {
+            int(vid)
+            for (vid,) in (
+                s.query(WeighEvent.variant_id)
+                .filter(WeighEvent.variant_id.isnot(None))
+                .distinct()
+            )
+            if vid is not None
+        }
 
-    items = []
+    items: List[dict] = []
     seen: Set[int] = set()
-    for row in rows:
-        vid = int(row[0])
-        seen.add(vid)
-        label = (row[1] or "").strip() or f"Variant {vid}"
-        if row[2] is False:
-            label = f"{label} (disabled)"
-        items.append({"id": vid, "name": label})
 
-    for (vid,) in event_variant_ids:
-        if vid is None:
-            continue
-        vid = int(vid)
+    for vid, name, enabled in configured:
+        vid_int = int(vid)
+        seen.add(vid_int)
+        historical_ids.discard(vid_int)
+        label = (name or "").strip() or f"Variant {vid_int}"
+        if enabled is False:
+            label = f"{label} (disabled)"
+        items.append({"id": vid_int, "name": label})
+
+    for vid in sorted(historical_ids):
         if vid in seen:
             continue
         items.append({"id": vid, "name": f"Variant {vid}"})
@@ -472,6 +481,7 @@ def production_output(
             bucket_col.label("bucket"),
             pass_sum.label("pass_count"),
             total_sum.label("total_count"),
+            func.min(WeighEvent.ts).label("sample_ts"),
         ).filter(WeighEvent.ts >= start_dt, WeighEvent.ts < end_dt)
 
         if variant_id is not None:
@@ -479,7 +489,22 @@ def production_output(
 
         rows = q.group_by(bucket_col).order_by(bucket_col).all()
 
-    bucket_map = {row.bucket: row for row in rows}
+    def _normalize_label(raw: Optional[str], sample_ts: Optional[datetime]) -> Optional[str]:
+        if raw:
+            return raw
+        if not sample_ts:
+            return None
+        if interval == "day":
+            return sample_ts.strftime("%Y-%m-%d")
+        aligned = sample_ts.replace(minute=0, second=0, microsecond=0)
+        return aligned.strftime("%Y-%m-%d %H:00")
+
+    bucket_map = {}
+    for row in rows:
+        normalized = _normalize_label(row.bucket, row.sample_ts)
+        if not normalized:
+            continue
+        bucket_map[normalized] = row
     data = []
     total_pass = 0
     total_fail = 0
