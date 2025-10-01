@@ -15,11 +15,12 @@
 
     .reading-card{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:40vh}
     .reading{font-weight:800;font-size:clamp(56px,12vw,144px);line-height:1;letter-spacing:-.02em}
-    .reading-sub{opacity:.75;margin-top:6px}
+    .reading-sub{opacity:.85;margin-top:6px;color:#cbd5f5}
     .status--pass{ background: rgba(35,173,78,.08) }  /* soft green tint */
     .status--fail{ background: rgba(214,57,57,.08) } /* soft red tint  */
 
-    .formgrid{display:grid;grid-template-columns:110px 1fr;gap:10px 14px;align-items:center}
+    .formgrid{display:grid;grid-template-columns:150px 1fr;gap:10px 14px;align-items:center}
+    .formgrid textarea{min-height:110px;resize:vertical}
     .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
     .kpis{display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:12px;margin-top:12px}
     .kpis .num{font-weight:700;font-size:clamp(20px,3.5vw,32px);text-align:center}
@@ -29,13 +30,17 @@
 <body class="app dark">
   <!-- same “chrome” as the other pages -->
   <header class="card topbar">
-    <div class="brand" style="font-weight:700">Weigh Station</div>
+    <div class="brand">
+      <img src="/static/gentex-logo.svg" alt="Gentex Corporation" class="brand-logo">
+      <span class="brand-title">Weigh Station</span>
+    </div>
     <nav class="nav">
       <a href="/" class="active">Home</a>
       <a href="/settings">Settings</a>
       <a href="/production">Production</a>
       <a href="/stats">Stats</a>
       <a href="/export">Export</a>
+      <a href="/serial-log">Serial Log</a>
     </nav>
   </header>
 
@@ -50,21 +55,34 @@
       <!-- Right: controls -->
       <section class="card" style="padding:14px">
         <div class="formgrid">
+          <label for="mouldingSerial">Moulding Serial</label>
+          <input id="mouldingSerial" type="text" placeholder="Enter moulding serial">
+
           <label for="variant">Variant</label>
           <select id="variant"></select>
 
-          <label for="operator">Operator</label>
-          <input id="operator" type="text" placeholder="Operator (kept between saves)">
+          <label for="contract">Contract</label>
+          <input id="contract" type="text" placeholder="Contract number">
 
-          <label for="serial">Serial</label>
-          <input id="serial" type="text" placeholder="Scan/enter serial…">
+          <label for="orderNumber">Order Number</label>
+          <input id="orderNumber" type="text" placeholder="Order number">
+
+          <label for="operator">Operator</label>
+          <input id="operator" type="text" placeholder="Operator name">
+
+          <label for="colour">Colour</label>
+          <input id="colour" type="text" placeholder="Colour">
+
+          <label for="finalSerial">Final Serial</label>
+          <input id="finalSerial" type="text" placeholder="Scan or enter final serial" autocomplete="off">
+
+          <label for="notes">Notes</label>
+          <textarea id="notes" placeholder="Notes for this weigh"></textarea>
         </div>
 
         <div class="actions">
           <button id="saveBtn">Save</button>
         </div>
-
-        <p class="muted" style="margin-top:8px">Use the Settings page in the top navigation for tare and calibration controls.</p>
 
         <div class="muted" style="margin-top:16px;margin-bottom:4px;font-size:0.95rem">Totals for today</div>
         <div class="kpis">
@@ -80,20 +98,30 @@
 
 <script>
 const $ = (id)=>document.getElementById(id);
+const TZ_OFFSET_MINUTES = new Date().getTimezoneOffset();
 let currentVariant = null;
+let latestReading = {g: 0};
+let requireZeroReset = false;
+let zeroPromptActive = false;
+
+const ZERO_TOLERANCE_G = 0.5;
+const STICKY_FIELDS = ['mouldingSerial','contract','orderNumber','operator','colour'];
+const STICKY_STORAGE_KEY = 'weighStationStickyFields';
+const STICKY_TTL_MS = 30 * 60 * 1000;
 
 function fmtG(x){ return (Math.round(x*10)/10).toFixed(1)+' g'; }
-function setMsg(t, ok=true){ const m=$('msg'); m.textContent=t||''; m.style.color = ok ? '' : '#b00'; }
+function setMsg(t, ok=true){ const m=$('msg'); if(!m) return; m.textContent=t||''; m.style.color = ok ? '' : '#b00'; }
 function tint(ok){
-  const c = $('readingCard'); c.classList.remove('status--pass','status--fail');
+  const c = $('readingCard'); if(!c) return; c.classList.remove('status--pass','status--fail');
   if(ok===true) c.classList.add('status--pass');
   if(ok===false) c.classList.add('status--fail');
 }
 
 async function loadVariants(){
   try{
-    const v = await fetch('/api/variants').then(r=>r.json());
-    const sel = $('variant'); sel.innerHTML='';
+    const v = await fetch('/api/variants',{cache:'no-store'}).then(r=>r.json());
+    const sel = $('variant'); if(!sel) return;
+    sel.innerHTML='';
     for(const it of v){
       const o=document.createElement('option');
       o.value=it.id; o.textContent=`${it.name || ('Variant '+it.id)} [${it.min_g}..${it.max_g} g]`;
@@ -109,8 +137,20 @@ async function loadVariants(){
 }
 
 function updateScreen(d){
+  if(!d || typeof d.g !== 'number') return;
+  latestReading = d;
   $('reading').textContent = fmtG(d.g);
-  $('readingSub').textContent = `RAW ${d.raw ?? '–'} • ${new Date().toLocaleTimeString()}`;
+  const sub = $('readingSub');
+  if(sub){
+    sub.textContent = `Last update • ${new Date().toLocaleTimeString()}`;
+  }
+  if(requireZeroReset && Math.abs(d.g) <= ZERO_TOLERANCE_G){
+    requireZeroReset = false;
+    if(zeroPromptActive){
+      setMsg('Scale back to zero – ready for next part.');
+      zeroPromptActive = false;
+    }
+  }
   if(currentVariant){
     const ok = (d.g >= currentVariant.min_g && d.g <= currentVariant.max_g);
     tint(ok);
@@ -126,41 +166,137 @@ function updateScreen(d){
 })();
 setInterval(async ()=>{
   try{
-    const d = await fetch('/api/debug/latest').then(r=>r.json());
+    const d = await fetch('/api/debug/latest',{cache:'no-store'}).then(r=>r.json());
     if(d && typeof d.g==='number') updateScreen(d);
   }catch{}
 }, 1500);
 
 async function refreshStats(){
   try{
-    const q = currentVariant ? `?variant_id=${currentVariant.id}` : '';
-    const s = await fetch('/api/stats'+q).then(r=>r.json());
+    const params = new URLSearchParams();
+    if(currentVariant) params.set('variant_id', currentVariant.id);
+    params.set('tz_offset', String(TZ_OFFSET_MINUTES));
+    const s = await fetch('/api/stats'+(params.toString()?`?${params}`:''),{cache:'no-store'}).then(r=>r.json());
     $('passCount').textContent  = s.pass ?? 0;
     $('failCount').textContent  = s.fail ?? 0;
     $('totalCount').textContent = s.total ?? 0;
   }catch{}
 }
 
+function readSticky(){
+  try{
+    const raw = localStorage.getItem(STICKY_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  }catch{
+    localStorage.removeItem(STICKY_STORAGE_KEY);
+    return null;
+  }
+}
+
+function clearStickyFields(clearInputs=true){
+  localStorage.removeItem(STICKY_STORAGE_KEY);
+  if(clearInputs){
+    for(const id of STICKY_FIELDS){
+      const el = $(id);
+      if(el) el.value='';
+    }
+  }
+}
+
+function applyStickyFields(){
+  const data = readSticky();
+  if(!data) return;
+  const ts = Number(data.ts);
+  if(!ts || (Date.now()-ts) > STICKY_TTL_MS){
+    clearStickyFields();
+    return;
+  }
+  const values = data.values || {};
+  for(const id of STICKY_FIELDS){
+    if(Object.prototype.hasOwnProperty.call(values, id)){
+      const el = $(id);
+      if(el) el.value = values[id] ?? '';
+    }
+  }
+}
+
+function persistStickyFields(){
+  const values = {};
+  for(const id of STICKY_FIELDS){
+    const el = $(id);
+    values[id] = el ? el.value ?? '' : '';
+  }
+  try{
+    localStorage.setItem(STICKY_STORAGE_KEY, JSON.stringify({ts: Date.now(), values}));
+  }catch{}
+}
+
+function bindStickyHandlers(){
+  for(const id of STICKY_FIELDS){
+    const el = $(id);
+    if(!el) continue;
+    el.addEventListener('input', persistStickyFields);
+    el.addEventListener('change', persistStickyFields);
+  }
+}
+
+function checkStickyExpiry(){
+  const data = readSticky();
+  if(!data) return;
+  const ts = Number(data.ts);
+  if(!ts || (Date.now()-ts) > STICKY_TTL_MS){
+    clearStickyFields();
+  }
+}
+
 async function doSave(){
   try{
     if(!currentVariant){ setMsg('Choose variant first', false); return; }
-    const serial = ($('serial').value || '').trim();
-    if(!serial){ setMsg('Serial cannot be blank', false); $('serial').focus(); return; }
-    let url = `/api/weigh/commit?variant_id=${encodeURIComponent(currentVariant.id)}&serial=${encodeURIComponent(serial)}`;
-    const op  = encodeURIComponent(($('operator')?.value || '').trim());
-    if(op) url += '&operator='+op;
-    const res = await fetch(url, {method:'POST'});
-    if(res.status===409){ setMsg('Serial already used', false); return; }
+    const finalSerialEl = $('finalSerial');
+    const serial = (finalSerialEl?.value || '').trim();
+    if(!serial){ setMsg('Final serial cannot be blank', false); finalSerialEl?.focus(); return; }
+
+    if(requireZeroReset && Math.abs(latestReading?.g ?? 0) > ZERO_TOLERANCE_G){
+      zeroPromptActive = true;
+      setMsg('Remove product and allow the scale to return to zero before saving.', false);
+      return;
+    }
+
+    const params = new URLSearchParams();
+    params.set('variant_id', String(currentVariant.id));
+    params.set('serial', serial);
+    params.set('moulding_serial', ($('mouldingSerial')?.value || '').trim());
+    params.set('contract', ($('contract')?.value || '').trim());
+    params.set('order_number', ($('orderNumber')?.value || '').trim());
+    params.set('operator', ($('operator')?.value || '').trim());
+    params.set('colour', ($('colour')?.value || '').trim());
+    params.set('notes', ($('notes')?.value || '').trim());
+
+    const res = await fetch(`/api/weigh/commit?${params.toString()}`, {method:'POST'});
+    if(res.status===409){ setMsg('Final serial already used', false); return; }
     if(!res.ok){ setMsg('Save failed', false); return; }
-    setMsg('Saved'); $('serial').value=''; refreshStats();
+    setMsg('Saved – remove product and return the scale to zero.');
+    zeroPromptActive = true;
+    requireZeroReset = true;
+    if(finalSerialEl) finalSerialEl.value='';
+    const notesEl = $('notes');
+    if(notesEl) notesEl.value='';
+    persistStickyFields();
+    refreshStats();
+    finalSerialEl?.focus();
   }catch{ setMsg('Save error', false); }
 }
 
 window.addEventListener('load', ()=>{
+  checkStickyExpiry();
+  applyStickyFields();
+  bindStickyHandlers();
+  setInterval(checkStickyExpiry, 60000);
   loadVariants();
   setInterval(refreshStats, 3000);
-  $('saveBtn').addEventListener('click', doSave);
-  $('serial').focus();
+  $('saveBtn')?.addEventListener('click', doSave);
+  $('finalSerial')?.addEventListener('keydown', ev=>{ if(ev.key==='Enter'){ ev.preventDefault(); doSave(); }});
+  $('finalSerial')?.focus();
 });
 </script>
 </body>
