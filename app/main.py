@@ -6,7 +6,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Quer
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, select, func, case
+from sqlalchemy import create_engine, select, func, case, or_
 from sqlalchemy.orm import sessionmaker
 from app.models import Base, Variant, Calibration, WeighEvent
 from app.hx711_reader import ScaleReader, ADCNotReadyError
@@ -52,6 +52,28 @@ _ensure_schema_migrations()
 
 app = FastAPI(title="Weigh Station")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+def _pass_condition_expr():
+    return or_(
+        WeighEvent.in_range.is_(True),
+        WeighEvent.in_range == 1,
+        WeighEvent.in_range == "1",
+        WeighEvent.in_range == "true",
+        WeighEvent.in_range == "TRUE",
+        WeighEvent.in_range == "True",
+    )
+
+
+def _fail_condition_expr():
+    return or_(
+        WeighEvent.in_range.is_(False),
+        WeighEvent.in_range == 0,
+        WeighEvent.in_range == "0",
+        WeighEvent.in_range == "false",
+        WeighEvent.in_range == "FALSE",
+        WeighEvent.in_range == "False",
+    )
 # --- Pydantic DTOs
 class VariantIn(BaseModel):
     name: str = Field(..., max_length=64)
@@ -292,8 +314,8 @@ def stats(
     today = datetime.utcnow().date()
     start_dt = datetime.combine(today, time.min)
     end_dt = start_dt + timedelta(days=1)
-    pass_case = func.sum(case((WeighEvent.in_range.is_(True), 1), else_=0))
-    fail_case = func.sum(case((WeighEvent.in_range.is_(False), 1), else_=0))
+    pass_case = func.sum(case((_pass_condition_expr(), 1), else_=0))
+    fail_case = func.sum(case((or_(_fail_condition_expr(), WeighEvent.in_range.is_(None)), 1), else_=0))
     with Session() as s:
         filters = [WeighEvent.ts >= start_dt, WeighEvent.ts < end_dt]
         if variant_id:
@@ -387,8 +409,11 @@ def production_output(
             current_dt += timedelta(hours=1)
 
     bucket_col = func.strftime(bucket_format, WeighEvent.ts)
-    pass_sum = func.sum(case((WeighEvent.in_range.is_(True), 1), else_=0))
-    fail_sum = func.sum(case((WeighEvent.in_range.is_(False), 1), else_=0))
+    pass_condition = _pass_condition_expr()
+    fail_condition = _fail_condition_expr()
+    pass_sum = func.sum(case((pass_condition, 1), else_=0))
+    fail_sum = func.sum(case((or_(fail_condition, WeighEvent.in_range.is_(None)), 1), else_=0))
+    total_sum = func.count(WeighEvent.id)
 
     with Session() as s:
         variant_meta = None
@@ -402,6 +427,7 @@ def production_output(
             bucket_col.label("bucket"),
             pass_sum.label("pass_count"),
             fail_sum.label("fail_count"),
+            total_sum.label("total_count"),
         ).filter(WeighEvent.ts >= start_dt, WeighEvent.ts < end_dt)
 
         if variant_id is not None:
@@ -413,13 +439,16 @@ def production_output(
     data = []
     total_pass = 0
     total_fail = 0
+    total_count = 0
     for label in bucket_labels:
         row = bucket_map.get(label)
         p = int(row.pass_count) if row and row.pass_count is not None else 0
         f = int(row.fail_count) if row and row.fail_count is not None else 0
-        data.append({"label": label, "pass": p, "fail": f})
+        t = int(row.total_count) if row and row.total_count is not None else p + f
+        data.append({"label": label, "pass": p, "fail": f, "total": t})
         total_pass += p
         total_fail += f
+        total_count += t
 
     return {
         "interval": interval,
@@ -431,7 +460,7 @@ def production_output(
         "totals": {
             "pass": total_pass,
             "fail": total_fail,
-            "total": total_pass + total_fail,
+            "total": total_count or (total_pass + total_fail),
         },
     }
 # --- CSV export
