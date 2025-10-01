@@ -75,12 +75,18 @@ async function loadVariants() {
   }
 }
 
+function todayIsoLocal() {
+  const now = new Date();
+  const tzOffsetMinutes = now.getTimezoneOffset();
+  const local = new Date(now.getTime() - tzOffsetMinutes * 60000);
+  return local.toISOString().slice(0, 10);
+}
+
 function setDefaultRange() {
   if (!startInput || !endInput) return;
-  const now = new Date();
-  const end = now.toISOString().slice(0, 10);
-  startInput.value = end;
-  endInput.value = end;
+  const today = todayIsoLocal();
+  if (!startInput.value) startInput.value = today;
+  if (!endInput.value) endInput.value = today;
 }
 
 function buildQuery() {
@@ -242,6 +248,13 @@ async function refresh() {
     const labels = buckets.map(b => b.label);
     const passData = buckets.map(b => b.pass ?? 0);
     const failData = buckets.map(b => b.fail ?? 0);
+
+    if (payload.start && startInput) {
+      startInput.value = payload.start;
+    }
+    if (payload.end && endInput) {
+      endInput.value = payload.end;
+    }
 
     drawChart(labels, passData, failData, payload.interval || intervalSelect.value);
 

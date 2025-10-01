@@ -185,15 +185,14 @@ def production_variants():
             .order_by(Variant.name.asc(), Variant.id.asc())
             .all()
         )
-        fallback_variants = []
-        if not rows:
-            fallback_variants = (
-                s.query(WeighEvent.variant_id)
-                .filter(WeighEvent.variant_id.isnot(None))
-                .distinct()
-                .order_by(WeighEvent.variant_id.asc())
-                .all()
-            )
+
+        event_variant_ids = (
+            s.query(WeighEvent.variant_id)
+            .filter(WeighEvent.variant_id.isnot(None))
+            .distinct()
+            .order_by(WeighEvent.variant_id.asc())
+            .all()
+        )
 
     items = []
     seen: Set[int] = set()
@@ -201,16 +200,18 @@ def production_variants():
         vid = int(row[0])
         seen.add(vid)
         label = (row[1] or "").strip() or f"Variant {vid}"
-        suffix = " (disabled)" if row[2] is False else ""
-        items.append({"id": vid, "name": f"{label}{suffix}" if suffix else label})
+        if row[2] is False:
+            label = f"{label} (disabled)"
+        items.append({"id": vid, "name": label})
 
-    for (vid,) in fallback_variants:
+    for (vid,) in event_variant_ids:
         if vid is None:
             continue
         vid = int(vid)
         if vid in seen:
             continue
         items.append({"id": vid, "name": f"Variant {vid}"})
+        seen.add(vid)
 
     return {"items": items}
 @app.post("/api/variants", response_model=VariantOut)
