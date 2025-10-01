@@ -17,6 +17,8 @@ let eventsEmpty;
 let eventsSummary;
 let eventsNotice;
 
+const tzOffsetMinutes = new Date().getTimezoneOffset();
+
 function setStatus(message, ok = true) {
   if (!statusEl) return;
   statusEl.textContent = message || '';
@@ -104,6 +106,7 @@ function buildQuery() {
   if (variantSelect?.value && variantSelect.value !== 'all') {
     params.set('variant_id', variantSelect.value);
   }
+  params.set('tz_offset', String(tzOffsetMinutes));
   return params.toString();
 }
 

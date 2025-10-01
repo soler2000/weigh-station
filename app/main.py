@@ -365,10 +365,17 @@ def commit(
 def stats(
     variant_id: Optional[int] = None,
     moulding_serial: Optional[str] = Query(default=None),
+    tz_offset: int = Query(0, description="Minutes to add to local time to reach UTC"),
 ):
-    today = datetime.utcnow().date()
-    start_dt = datetime.combine(today, time.min)
-    end_dt = start_dt + timedelta(days=1)
+    offset_minutes = int(tz_offset or 0)
+    offset_delta = timedelta(minutes=offset_minutes)
+
+    now_local = datetime.utcnow() - offset_delta
+    today_local = now_local.date()
+    start_local = datetime.combine(today_local, time.min)
+    end_local = start_local + timedelta(days=1)
+    start_dt = start_local + offset_delta
+    end_dt = end_local + offset_delta
     pass_case = func.sum(case((_pass_condition_expr(), 1), else_=0))
     fail_case = func.sum(case((or_(_fail_condition_expr(), WeighEvent.in_range.is_(None)), 1), else_=0))
     with Session() as s:
@@ -415,6 +422,7 @@ def production_output(
     start: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     variant_id: Optional[int] = Query(None, ge=1),
+    tz_offset: int = Query(0, description="Minutes to add to local time to reach UTC"),
 ):
     interval = (interval or "day").lower()
     if interval not in {"day", "hour"}:
@@ -430,16 +438,21 @@ def production_output(
 
     start_date = parse_iso_date(start, "start")
     end_date = parse_iso_date(end, "end")
-    today = datetime.utcnow().date()
+    offset_minutes = int(tz_offset or 0)
+    offset_delta = timedelta(minutes=offset_minutes)
+
+    today_local = (datetime.utcnow() - offset_delta).date()
     if end_date is None:
-        end_date = today
+        end_date = today_local
     if start_date is None:
         start_date = end_date
     if start_date > end_date:
         raise HTTPException(400, "start must be on or before end")
 
-    start_dt = datetime.combine(start_date, time.min)
-    end_dt = datetime.combine(end_date + timedelta(days=1), time.min)
+    start_local = datetime.combine(start_date, time.min)
+    end_local = datetime.combine(end_date + timedelta(days=1), time.min)
+    start_dt = start_local + offset_delta
+    end_dt = end_local + offset_delta
 
     bucket_labels: List[str] = []
     if interval == "day":
@@ -453,18 +466,18 @@ def production_output(
             current += timedelta(days=1)
     else:
         max_hours = 31 * 24  # ~1 month of hourly buckets
-        total_hours = int((end_dt - start_dt).total_seconds() // 3600)
+        total_hours = int((end_local - start_local).total_seconds() // 3600)
         if total_hours > max_hours:
             raise HTTPException(400, f"Date range too large for hourly view (max {max_hours} hours).")
-        current_dt = start_dt
-        while current_dt < end_dt:
+        current_dt = start_local
+        while current_dt < end_local:
             bucket_labels.append(current_dt.strftime("%Y-%m-%d %H:00"))
             current_dt += timedelta(hours=1)
 
-    def _bucket_label(ts: datetime) -> str:
+    def _bucket_label(ts_local: datetime) -> str:
         if interval == "day":
-            return ts.strftime("%Y-%m-%d")
-        aligned = ts.replace(minute=0, second=0, microsecond=0)
+            return ts_local.strftime("%Y-%m-%d")
+        aligned = ts_local.replace(minute=0, second=0, microsecond=0)
         return aligned.strftime("%Y-%m-%d %H:00")
 
     def _classify(value: Optional[object]) -> Optional[bool]:
@@ -522,7 +535,8 @@ def production_output(
     events_truncated = False
 
     for idx, row in enumerate(rows):
-        label = _bucket_label(row.ts)
+        local_ts = row.ts - offset_delta
+        label = _bucket_label(local_ts)
         bucket = bucket_totals.setdefault(label, {"pass": 0, "fail": 0, "total": 0})
         bucket["total"] += 1
         status = _classify(row.in_range)
@@ -534,7 +548,7 @@ def production_output(
         if idx < event_limit:
             events_payload.append(
                 {
-                    "ts": row.ts.isoformat(),
+                    "ts": local_ts.isoformat(),
                     "variant_id": row.variant_id,
                     "variant": variants_by_id.get(
                         row.variant_id, f"Variant {row.variant_id}" if row.variant_id else "—"

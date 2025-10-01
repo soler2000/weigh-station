@@ -98,6 +98,7 @@
 
 <script>
 const $ = (id)=>document.getElementById(id);
+const TZ_OFFSET_MINUTES = new Date().getTimezoneOffset();
 let currentVariant = null;
 let latestReading = {g: 0};
 let requireZeroReset = false;
@@ -174,6 +175,7 @@ async function refreshStats(){
   try{
     const params = new URLSearchParams();
     if(currentVariant) params.set('variant_id', currentVariant.id);
+    params.set('tz_offset', String(TZ_OFFSET_MINUTES));
     const s = await fetch('/api/stats'+(params.toString()?`?${params}`:''),{cache:'no-store'}).then(r=>r.json());
     $('passCount').textContent  = s.pass ?? 0;
     $('failCount').textContent  = s.fail ?? 0;

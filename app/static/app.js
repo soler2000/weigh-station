@@ -8,6 +8,7 @@ const failEl    = document.getElementById('failCount');
 
 let ws = null;
 let pollTimer = null;
+const tzOffsetMinutes = new Date().getTimezoneOffset();
 
 async function loadVariants() {
   const res = await fetch('/api/variants', { cache: 'no-store' });
@@ -18,9 +19,12 @@ async function loadVariants() {
 }
 
 async function refreshStats() {
+  const params = new URLSearchParams();
   const variant_id = sel.value || '';
-  const url = variant_id ? `/api/stats?variant_id=${variant_id}` : '/api/stats';
-  const res = await fetch(url, { cache: 'no-store' });
+  if (variant_id) params.set('variant_id', variant_id);
+  params.set('tz_offset', String(tzOffsetMinutes));
+  const qs = params.toString();
+  const res = await fetch(`/api/stats${qs ? `?${qs}` : ''}`, { cache: 'no-store' });
   if (!res.ok) return;
   const s = await res.json();
   if (passEl) passEl.textContent = s.pass ?? 0;
