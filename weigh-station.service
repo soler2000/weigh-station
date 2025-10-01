@@ -4,13 +4,17 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+Type=simple
 User=pi
+Group=pi
 WorkingDirectory=/home/pi/weigh-station
 Environment="PYTHONUNBUFFERED=1"
 # Optional: configure pins with env if not using D5/D6
 # Environment="DATA_PIN=D5" "CLOCK_PIN=D6"
+EnvironmentFile=-/etc/default/weigh-station
 ExecStart=/home/pi/weigh-station/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 6000
 Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

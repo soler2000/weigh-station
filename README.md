@@ -26,6 +26,24 @@ pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+### Run as a service
+
+To keep the application running automatically on boot, install the provided
+`weigh-station.service` unit:
+
+```bash
+sudo cp weigh-station.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now weigh-station.service
+```
+
+The unit assumes the project lives at `/home/pi/weigh-station` and that a
+virtual environment exists at `/home/pi/weigh-station/.venv`. Adjust those paths
+in the service file if your deployment differs.
+
+Optional environment overrides can be set in `/etc/default/weigh-station` using
+`KEY=value` lines. See the table below for the available variables.
+
 ### Environment variables
 
 | Name | Default | Description |
