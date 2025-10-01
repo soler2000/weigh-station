@@ -177,32 +177,24 @@ def list_variants():
         return [VariantOut(id=v.id, name=v.name, min_g=v.min_g, max_g=v.max_g, unit=v.unit, enabled=v.enabled) for v in vs]
 
 
-@app.get("/api/production/variants")
-def production_variants():
-    """Return every variant referenced by production output.
+def _collect_production_variants(session) -> List[dict]:
+    """Return configured variants plus any orphaned historical IDs."""
 
-    The caller expects a simple list of `{id, name}` dictionaries. We prefer the
-    configured variant name when available but we still surface orphaned
-    `variant_id` values that only exist in historical weigh events so operators
-    can continue to filter their legacy data.
-    """
+    configured: List[Tuple[int, Optional[str], Optional[bool]]] = (
+        session.query(Variant.id, Variant.name, Variant.enabled)
+        .order_by(func.lower(Variant.name).asc(), Variant.id.asc())
+        .all()
+    )
 
-    with Session() as s:
-        configured: List[Tuple[int, Optional[str], Optional[bool]]] = (
-            s.query(Variant.id, Variant.name, Variant.enabled)
-            .order_by(func.lower(Variant.name).asc(), Variant.id.asc())
-            .all()
+    historical_ids: Set[int] = {
+        int(vid)
+        for (vid,) in (
+            session.query(WeighEvent.variant_id)
+            .filter(WeighEvent.variant_id.isnot(None))
+            .distinct()
         )
-
-        historical_ids: Set[int] = {
-            int(vid)
-            for (vid,) in (
-                s.query(WeighEvent.variant_id)
-                .filter(WeighEvent.variant_id.isnot(None))
-                .distinct()
-            )
-            if vid is not None
-        }
+        if vid is not None
+    }
 
     items: List[dict] = []
     seen: Set[int] = set()
@@ -222,7 +214,21 @@ def production_variants():
         items.append({"id": vid, "name": f"Variant {vid}"})
         seen.add(vid)
 
-    return {"items": items}
+    return items
+
+
+@app.get("/api/production/variants")
+def production_variants():
+    """Return every variant referenced by production output.
+
+    The caller expects a simple list of `{id, name}` dictionaries. We prefer the
+    configured variant name when available but we still surface orphaned
+    `variant_id` values that only exist in historical weigh events so operators
+    can continue to filter their legacy data.
+    """
+
+    with Session() as s:
+        return {"items": _collect_production_variants(s)}
 @app.post("/api/variants", response_model=VariantOut)
 def create_variant(v: VariantIn):
     with Session() as s:
@@ -500,6 +506,7 @@ def production_output(
 
     with Session() as s:
         variant_meta = None
+        variant_options = _collect_production_variants(s)
         variants_by_id = {
             row.id: (row.name or "").strip() or f"Variant {row.id}"
             for row in s.query(Variant).all()
@@ -598,6 +605,7 @@ def production_output(
         "end": end_date.isoformat(),
         "bucket_count": len(bucket_labels),
         "variant": variant_meta,
+        "variants": variant_options,
         "buckets": bucket_data,
         "totals": {
             "pass": total_pass,
@@ -605,6 +613,7 @@ def production_output(
             "total": total_count or (total_pass + total_fail),
             "pass_rate": overall_rate,
         },
+        "query_count": len(rows),
         "events": events_payload,
         "events_truncated": events_truncated,
         "events_limit": event_limit,

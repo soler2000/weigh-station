@@ -19,28 +19,35 @@ let eventsNotice;
 
 const tzOffsetMinutes = new Date().getTimezoneOffset();
 
-function setStatus(message, ok = true) {
+function setStatus(message, ok) {
   if (!statusEl) return;
   statusEl.textContent = message || '';
-  statusEl.style.color = ok ? 'var(--app-fg-muted)' : '#f87171';
+  statusEl.style.color = ok === false ? '#f87171' : 'var(--app-fg-muted)';
 }
 
 function setLoading(isLoading) {
   if (!refreshBtn) return;
-  refreshBtn.disabled = isLoading;
+  refreshBtn.disabled = !!isLoading;
   refreshBtn.textContent = isLoading ? 'Loading…' : 'Refresh';
 }
 
 function formatNumber(value) {
-  const num = Number(value) || 0;
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    return '0';
+  }
   return num.toLocaleString();
 }
 
 function formatPercent(rate) {
-  if (rate === null || rate === undefined || Number.isNaN(rate)) {
+  if (rate === null || rate === undefined) {
     return '—';
   }
-  return `${(rate * 100).toFixed(1)}%`;
+  const num = Number(rate);
+  if (!Number.isFinite(num)) {
+    return '—';
+  }
+  return `${(num * 100).toFixed(1)}%`;
 }
 
 function todayIsoLocal() {
@@ -56,15 +63,68 @@ function setDefaultRange() {
   if (endInput && !endInput.value) endInput.value = today;
 }
 
+function normalizeVariant(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  let id = raw.id;
+  if (id === undefined || id === null) {
+    id = raw.value;
+  }
+  if (id === undefined || id === null) {
+    return null;
+  }
+  let label = raw.name;
+  if (label === undefined || label === null || String(label).trim() === '') {
+    if (raw.label !== undefined && raw.label !== null && String(raw.label).trim() !== '') {
+      label = raw.label;
+    } else if (raw.display !== undefined && raw.display !== null && String(raw.display).trim() !== '') {
+      label = raw.display;
+    } else {
+      label = `Variant ${id}`;
+    }
+  }
+  return { id: String(id), label: String(label) };
+}
+
+function applyVariantOptions(list, preserveSelection) {
+  if (!variantSelect) return;
+  const current = preserveSelection && variantSelect.value ? variantSelect.value : 'all';
+  const options = ['<option value="all">All Variants</option>'];
+  let hasMatch = current === 'all';
+
+  for (let i = 0; i < list.length; i += 1) {
+    const item = list[i];
+    options.push(`<option value="${item.id}">${item.label}</option>`);
+    if (item.id === current) {
+      hasMatch = true;
+    }
+  }
+
+  variantSelect.innerHTML = options.join('');
+  variantSelect.value = hasMatch ? current : 'all';
+}
+
 async function fetchVariants() {
   const endpoints = ['/api/production/variants', '/api/variants'];
-  for (const url of endpoints) {
+  for (let i = 0; i < endpoints.length; i += 1) {
+    const url = endpoints[i];
     try {
       const res = await fetch(url, { cache: 'no-store' });
-      if (!res.ok) throw new Error(`Request failed: ${url}`);
+      if (!res.ok) {
+        throw new Error(`Request failed: ${res.status}`);
+      }
       const payload = await res.json();
-      if (Array.isArray(payload)) return payload;
-      if (Array.isArray(payload?.items)) return payload.items;
+      let list = [];
+      if (Array.isArray(payload)) {
+        list = payload;
+      } else if (payload && Array.isArray(payload.items)) {
+        list = payload.items;
+      }
+      const normalized = [];
+      for (let j = 0; j < list.length; j += 1) {
+        const normalizedItem = normalizeVariant(list[j]);
+        if (normalizedItem) normalized.push(normalizedItem);
+      }
+      return normalized;
     } catch (err) {
       console.warn('Variant fetch failed', url, err);
     }
@@ -74,26 +134,15 @@ async function fetchVariants() {
 
 async function loadVariants() {
   if (!variantSelect) return;
-  const current = variantSelect.value || 'all';
   try {
     const variants = await fetchVariants();
-    const options = ['<option value="all">All Variants</option>'];
-    for (const item of variants) {
-      const id = item?.id ?? item?.value;
-      if (id == null) continue;
-      const label = (item?.name || item?.label || item?.display || `Variant ${id}`).toString();
-      options.push(`<option value="${id}">${label}</option>`);
-    }
-    variantSelect.innerHTML = options.join('');
-    if (variants.some(v => String(v?.id ?? v?.value) === current)) {
-      variantSelect.value = current;
-    } else {
-      variantSelect.value = 'all';
+    applyVariantOptions(variants, true);
+    if (variants.length === 0) {
+      setStatus('No variants found. Configure variants in Settings.', false);
     }
   } catch (err) {
     console.error(err);
-    variantSelect.innerHTML = '<option value="all">All Variants</option>';
-    variantSelect.value = 'all';
+    applyVariantOptions([], false);
     setStatus('Failed to load variants.', false);
   }
 }
@@ -101,9 +150,9 @@ async function loadVariants() {
 function buildQuery() {
   const params = new URLSearchParams();
   if (intervalSelect) params.set('interval', intervalSelect.value);
-  if (startInput?.value) params.set('start', startInput.value);
-  if (endInput?.value) params.set('end', endInput.value);
-  if (variantSelect?.value && variantSelect.value !== 'all') {
+  if (startInput && startInput.value) params.set('start', startInput.value);
+  if (endInput && endInput.value) params.set('end', endInput.value);
+  if (variantSelect && variantSelect.value && variantSelect.value !== 'all') {
     params.set('variant_id', variantSelect.value);
   }
   params.set('tz_offset', String(tzOffsetMinutes));
@@ -129,21 +178,23 @@ function renderBuckets(buckets) {
     return;
   }
 
-  const rows = buckets.map(bucket => {
-    const passRate = formatPercent(bucket.pass_rate);
-    return `
-      <tr>
-        <td>${escapeHtml(bucket.label)}</td>
-        <td>${formatNumber(bucket.total)}</td>
-        <td>${formatNumber(bucket.pass)}</td>
-        <td>${formatNumber(bucket.fail)}</td>
-        <td>${passRate}</td>
-      </tr>
-    `;
-  });
+  const rows = [];
+  for (let i = 0; i < buckets.length; i += 1) {
+    const bucket = buckets[i];
+    rows.push(
+      '<tr>' +
+        `<td>${escapeHtml(bucket.label)}</td>` +
+        `<td>${formatNumber(bucket.total)}</td>` +
+        `<td>${formatNumber(bucket.pass)}</td>` +
+        `<td>${formatNumber(bucket.fail)}</td>` +
+        `<td>${formatPercent(bucket.pass_rate)}</td>` +
+      '</tr>'
+    );
+  }
 
   bucketRows.innerHTML = rows.join('');
   bucketEmpty.hidden = true;
+  bucketSummary.textContent = `${buckets.length} bucket${buckets.length === 1 ? '' : 's'} returned.`;
 }
 
 function renderEvents(events, truncated, limit) {
@@ -156,24 +207,26 @@ function renderEvents(events, truncated, limit) {
     return;
   }
 
-  const rows = events.map(evt => {
+  const rows = [];
+  for (let i = 0; i < events.length; i += 1) {
+    const evt = events[i];
     const status = evt.status === 'pass' ? 'Pass' : evt.status === 'fail' ? 'Fail' : '—';
     const weight = evt.net_g === null || evt.net_g === undefined ? '—' : Number(evt.net_g).toFixed(2);
-    return `
-      <tr>
-        <td>${escapeHtml(evt.ts)}</td>
-        <td>${escapeHtml(evt.variant ?? '—')}</td>
-        <td>${escapeHtml(evt.serial ?? '—')}</td>
-        <td>${escapeHtml(evt.moulding_serial ?? '—')}</td>
-        <td>${escapeHtml(evt.contract ?? '—')}</td>
-        <td>${escapeHtml(evt.order_number ?? '—')}</td>
-        <td>${escapeHtml(evt.operator ?? '—')}</td>
-        <td>${escapeHtml(evt.colour ?? '—')}</td>
-        <td>${status}</td>
-        <td>${weight}</td>
-      </tr>
-    `;
-  });
+    rows.push(
+      '<tr>' +
+        `<td>${escapeHtml(evt.ts)}</td>` +
+        `<td>${escapeHtml(evt.variant !== undefined && evt.variant !== null ? evt.variant : '—')}</td>` +
+        `<td>${escapeHtml(evt.serial !== undefined && evt.serial !== null ? evt.serial : '—')}</td>` +
+        `<td>${escapeHtml(evt.moulding_serial !== undefined && evt.moulding_serial !== null ? evt.moulding_serial : '—')}</td>` +
+        `<td>${escapeHtml(evt.contract !== undefined && evt.contract !== null ? evt.contract : '—')}</td>` +
+        `<td>${escapeHtml(evt.order_number !== undefined && evt.order_number !== null ? evt.order_number : '—')}</td>` +
+        `<td>${escapeHtml(evt.operator !== undefined && evt.operator !== null ? evt.operator : '—')}</td>` +
+        `<td>${escapeHtml(evt.colour !== undefined && evt.colour !== null ? evt.colour : '—')}</td>` +
+        `<td>${status}</td>` +
+        `<td>${weight}</td>` +
+      '</tr>'
+    );
+  }
 
   eventRows.innerHTML = rows.join('');
   eventsEmpty.hidden = true;
@@ -183,6 +236,16 @@ function renderEvents(events, truncated, limit) {
   } else {
     eventsNotice.textContent = '';
   }
+}
+
+function describeVariant(payloadVariant) {
+  if (payloadVariant && payloadVariant.name) {
+    return payloadVariant.name;
+  }
+  if (variantSelect && variantSelect.value && variantSelect.value !== 'all') {
+    return `Variant ${variantSelect.value}`;
+  }
+  return 'All variants';
 }
 
 async function refresh() {
@@ -201,44 +264,65 @@ async function refresh() {
     if (!res.ok) {
       let msg = 'Failed to load production output.';
       try {
-        const payload = await res.json();
-        if (payload?.detail) msg = payload.detail;
-      } catch (_) {}
+        const problem = await res.json();
+        if (problem && problem.detail) msg = problem.detail;
+      } catch (err) {
+        // ignore JSON parse errors
+      }
       throw new Error(msg);
     }
 
     const payload = await res.json();
-    const totals = payload.totals || {};
+
+    if (Array.isArray(payload.variants) && payload.variants.length) {
+      const normalized = [];
+      for (let i = 0; i < payload.variants.length; i += 1) {
+        const normalizedItem = normalizeVariant(payload.variants[i]);
+        if (normalizedItem) normalized.push(normalizedItem);
+      }
+      if (normalized.length) {
+        applyVariantOptions(normalized, true);
+      }
+    }
 
     if (startInput && payload.start) startInput.value = payload.start;
     if (endInput && payload.end) endInput.value = payload.end;
 
-    totalEl.textContent = formatNumber(totals.total ?? 0);
-    passEl.textContent = formatNumber(totals.pass ?? 0);
-    failEl.textContent = formatNumber(totals.fail ?? 0);
+    const totals = payload.totals || {};
+    totalEl.textContent = formatNumber(totals.total);
+    passEl.textContent = formatNumber(totals.pass);
+    failEl.textContent = formatNumber(totals.fail);
 
-    const passRate = totals.pass_rate ?? null;
+    const passRate = totals.pass_rate;
     passRateEl.textContent = formatPercent(passRate);
-    if (passRate !== null && passRate !== undefined && !Number.isNaN(passRate)) {
-      const totalCount = totals.total ?? 0;
-      passRateSubEl.textContent = `Based on ${formatNumber(totalCount)} result${totalCount === 1 ? '' : 's'}.`;
+    if (passRate !== null && passRate !== undefined && Number.isFinite(Number(passRate))) {
+      const totalCount = Number(totals.total);
+      const numericCount = Number.isFinite(totalCount) ? totalCount : 0;
+      const labelCount = formatNumber(numericCount);
+      passRateSubEl.textContent = `Based on ${labelCount} result${numericCount === 1 ? '' : 's'}.`;
     } else {
       passRateSubEl.textContent = '';
     }
 
-    renderBuckets(payload.buckets || []);
-    if (bucketSummary) {
-      const count = Array.isArray(payload.buckets) ? payload.buckets.length : 0;
-      bucketSummary.textContent = count ? `${count} bucket${count === 1 ? '' : 's'} returned.` : '';
-    }
+    const buckets = Array.isArray(payload.buckets) ? payload.buckets : [];
+    renderBuckets(buckets);
 
-    renderEvents(payload.events || [], payload.events_truncated, payload.events_limit);
+    const events = Array.isArray(payload.events) ? payload.events : [];
+    const truncated = !!payload.events_truncated;
+    const limit = Number(payload.events_limit) || events.length;
+    renderEvents(events, truncated, limit);
 
-    const labelsCount = Array.isArray(payload.buckets) ? payload.buckets.length : 0;
+    const variantName = describeVariant(payload.variant);
+    const rangeStart = payload.start || (startInput ? startInput.value : '—');
+    const rangeEnd = payload.end || (endInput ? endInput.value : '—');
     const intervalLabel = payload.interval === 'hour' ? 'hour' : 'day';
-    const variantName = payload.variant?.name || (variantSelect?.value && variantSelect.value !== 'all' ? `Variant ${variantSelect.value}` : 'All variants');
-    const rangeText = `${payload.start ?? startInput.value || '—'} → ${payload.end ?? endInput.value || '—'}`;
-    setStatus(`Showing ${labelsCount} ${intervalLabel}${labelsCount === 1 ? '' : 's'} for ${variantName} (${rangeText}).`);
+    const bucketCount = buckets.length;
+    const queryCount = Number(payload.query_count);
+    let suffix = '';
+    if (Number.isFinite(queryCount)) {
+      suffix = ` Queried ${formatNumber(queryCount)} event${queryCount === 1 ? '' : 's'}.`;
+    }
+    setStatus(`Showing ${bucketCount} ${intervalLabel}${bucketCount === 1 ? '' : 's'} for ${variantName} (${rangeStart} → ${rangeEnd}).${suffix}`);
   } catch (err) {
     console.error(err);
     totalEl.textContent = '0';
@@ -291,7 +375,9 @@ async function init() {
 }
 
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => { init().catch(err => console.error(err)); });
+  document.addEventListener('DOMContentLoaded', function () {
+    init().catch(function (err) { console.error(err); });
+  });
 } else {
-  init().catch(err => console.error(err));
+  init().catch(function (err) { console.error(err); });
 }
