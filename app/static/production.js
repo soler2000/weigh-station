@@ -12,10 +12,12 @@ let statusEl;
 let bucketRows;
 let bucketEmpty;
 let bucketSummary;
-let eventRows;
-let eventsEmpty;
-let eventsSummary;
-let eventsNotice;
+let chartCanvas;
+let chartEmpty;
+let chartSummary;
+
+let currentChartBuckets = [];
+let currentChartInterval = 'day';
 
 const tzOffsetMinutes = new Date().getTimezoneOffset();
 
@@ -197,44 +199,130 @@ function renderBuckets(buckets) {
   bucketSummary.textContent = `${buckets.length} bucket${buckets.length === 1 ? '' : 's'} returned.`;
 }
 
-function renderEvents(events, truncated, limit) {
-  if (!eventRows || !eventsEmpty || !eventsSummary || !eventsNotice) return;
-  if (!Array.isArray(events) || events.length === 0) {
-    eventRows.innerHTML = '';
-    eventsEmpty.hidden = false;
-    eventsSummary.textContent = '';
-    eventsNotice.textContent = '';
+function niceCeiling(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return 1;
+  }
+  const exponent = Math.floor(Math.log10(numeric));
+  const base = Math.pow(10, exponent);
+  const normalized = numeric / base;
+  let nice;
+  if (normalized <= 1) nice = 1;
+  else if (normalized <= 2) nice = 2;
+  else if (normalized <= 5) nice = 5;
+  else nice = 10;
+  return nice * base;
+}
+
+function renderOutputChart(buckets, interval) {
+  if (!chartCanvas || !chartEmpty || !chartSummary) return;
+
+  const ctx = chartCanvas.getContext('2d');
+  const rect = chartCanvas.getBoundingClientRect();
+  const width = rect.width || chartCanvas.clientWidth || 640;
+  const height = rect.height || chartCanvas.clientHeight || 320;
+  const dpr = window.devicePixelRatio || 1;
+
+  chartCanvas.width = width * dpr;
+  chartCanvas.height = height * dpr;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, width, height);
+
+  const hasRows = Array.isArray(buckets) && buckets.length > 0 && buckets.some((b) => Number(b.total) > 0);
+  if (!hasRows) {
+    chartEmpty.hidden = false;
+    chartSummary.textContent = 'No production totals available for the selected filters.';
     return;
   }
 
-  const rows = [];
-  for (let i = 0; i < events.length; i += 1) {
-    const evt = events[i];
-    const status = evt.status === 'pass' ? 'Pass' : evt.status === 'fail' ? 'Fail' : '—';
-    const weight = evt.net_g === null || evt.net_g === undefined ? '—' : Number(evt.net_g).toFixed(2);
-    rows.push(
-      '<tr>' +
-        `<td>${escapeHtml(evt.ts)}</td>` +
-        `<td>${escapeHtml(evt.variant !== undefined && evt.variant !== null ? evt.variant : '—')}</td>` +
-        `<td>${escapeHtml(evt.serial !== undefined && evt.serial !== null ? evt.serial : '—')}</td>` +
-        `<td>${escapeHtml(evt.moulding_serial !== undefined && evt.moulding_serial !== null ? evt.moulding_serial : '—')}</td>` +
-        `<td>${escapeHtml(evt.contract !== undefined && evt.contract !== null ? evt.contract : '—')}</td>` +
-        `<td>${escapeHtml(evt.order_number !== undefined && evt.order_number !== null ? evt.order_number : '—')}</td>` +
-        `<td>${escapeHtml(evt.operator !== undefined && evt.operator !== null ? evt.operator : '—')}</td>` +
-        `<td>${escapeHtml(evt.colour !== undefined && evt.colour !== null ? evt.colour : '—')}</td>` +
-        `<td>${status}</td>` +
-        `<td>${weight}</td>` +
-      '</tr>'
-    );
+  chartEmpty.hidden = true;
+  const intervalLabel = interval === 'hour' ? 'hourly' : 'daily';
+  chartSummary.textContent = `Stacked ${intervalLabel} totals for ${buckets.length} bucket${buckets.length === 1 ? '' : 's'}.`;
+
+  const paddingTop = 16;
+  const paddingRight = 24;
+  const paddingBottom = 56;
+  const paddingLeft = 56;
+  const plotWidth = Math.max(0, width - paddingLeft - paddingRight);
+  const plotHeight = Math.max(0, height - paddingTop - paddingBottom);
+
+  const totals = buckets.map((b) => Number(b.total) || 0);
+  const passes = buckets.map((b) => Number(b.pass) || 0);
+  const fails = buckets.map((b) => Number(b.fail) || 0);
+  const maxTotal = Math.max(...totals, 0);
+  const scaleMax = niceCeiling(maxTotal);
+  const yRatio = scaleMax > 0 ? plotHeight / scaleMax : 0;
+
+  const tickCount = 5;
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(148, 163, 184, 0.32)';
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '12px "Inter", "Segoe UI", sans-serif';
+  ctx.textBaseline = 'middle';
+
+  for (let i = 0; i <= tickCount; i += 1) {
+    const value = (scaleMax / tickCount) * i;
+    const y = height - paddingBottom - value * yRatio;
+    ctx.beginPath();
+    ctx.moveTo(paddingLeft, y);
+    ctx.lineTo(width - paddingRight, y);
+    ctx.stroke();
+    ctx.fillStyle = '#94a3b8';
+    ctx.textAlign = 'right';
+    ctx.fillText(formatNumber(value), paddingLeft - 8, y);
   }
 
-  eventRows.innerHTML = rows.join('');
-  eventsEmpty.hidden = true;
-  eventsSummary.textContent = `Showing ${events.length} event${events.length === 1 ? '' : 's'}.`;
-  if (truncated) {
-    eventsNotice.textContent = `Showing the first ${events.length} events (limit ${limit}). Narrow the date range to see additional history.`;
-  } else {
-    eventsNotice.textContent = '';
+  ctx.strokeStyle = 'rgba(148, 163, 184, 0.5)';
+  ctx.beginPath();
+  ctx.moveTo(paddingLeft, height - paddingBottom);
+  ctx.lineTo(width - paddingRight, height - paddingBottom);
+  ctx.stroke();
+
+  const count = buckets.length;
+  const step = count > 0 ? plotWidth / count : plotWidth;
+  const barWidth = Math.max(18, Math.min(52, step * 0.6));
+
+  ctx.textBaseline = 'middle';
+
+  for (let i = 0; i < count; i += 1) {
+    const x = paddingLeft + step * i + (step - barWidth) / 2;
+    const total = totals[i];
+    const passValue = passes[i];
+    const failValue = fails[i];
+    const passHeight = passValue * yRatio;
+    const failHeight = failValue * yRatio;
+    const barBottom = height - paddingBottom;
+
+    ctx.fillStyle = '#22c55e';
+    ctx.fillRect(x, barBottom - passHeight, barWidth, passHeight);
+
+    if (failValue > 0) {
+      ctx.fillStyle = '#ef4444';
+      ctx.fillRect(x, barBottom - passHeight - failHeight, barWidth, failHeight);
+    }
+
+    if (total > 0) {
+      ctx.fillStyle = '#e2e8f0';
+      ctx.textAlign = 'center';
+      ctx.font = '12px "Inter", "Segoe UI", sans-serif';
+      const textY = Math.max(12, barBottom - (passHeight + failHeight) - 10);
+      ctx.fillText(formatNumber(total), x + barWidth / 2, textY);
+    }
+
+    let label = String(buckets[i].label || '');
+    if (label.length > 20) {
+      label = `${label.slice(0, 20)}…`;
+    }
+    ctx.save();
+    ctx.translate(x + barWidth / 2, barBottom + 18);
+    ctx.rotate(-Math.PI / 4);
+    ctx.fillStyle = '#cbd5f5';
+    ctx.textAlign = 'right';
+    ctx.font = '12px "Inter", "Segoe UI", sans-serif';
+    ctx.fillText(label, 0, 0);
+    ctx.restore();
   }
 }
 
@@ -307,10 +395,9 @@ async function refresh() {
     const buckets = Array.isArray(payload.buckets) ? payload.buckets : [];
     renderBuckets(buckets);
 
-    const events = Array.isArray(payload.events) ? payload.events : [];
-    const truncated = !!payload.events_truncated;
-    const limit = Number(payload.events_limit) || events.length;
-    renderEvents(events, truncated, limit);
+    currentChartBuckets = buckets;
+    currentChartInterval = payload.interval === 'hour' ? 'hour' : 'day';
+    renderOutputChart(currentChartBuckets, currentChartInterval);
 
     const variantName = describeVariant(payload.variant);
     const rangeStart = payload.start || (startInput ? startInput.value : '—');
@@ -331,7 +418,8 @@ async function refresh() {
     passRateEl.textContent = '—';
     passRateSubEl.textContent = '';
     renderBuckets([]);
-    renderEvents([], false, 0);
+    currentChartBuckets = [];
+    renderOutputChart([], currentChartInterval);
     setStatus(err.message || 'Failed to load production output.', false);
   } finally {
     setLoading(false);
@@ -353,10 +441,9 @@ async function init() {
   bucketRows = document.getElementById('bucketRows');
   bucketEmpty = document.getElementById('bucketEmpty');
   bucketSummary = document.getElementById('bucketSummary');
-  eventRows = document.getElementById('eventRows');
-  eventsEmpty = document.getElementById('eventsEmpty');
-  eventsSummary = document.getElementById('eventsSummary');
-  eventsNotice = document.getElementById('eventsNotice');
+  chartCanvas = document.getElementById('outputChart');
+  chartEmpty = document.getElementById('chartEmpty');
+  chartSummary = document.getElementById('chartSummary');
 
   if (!variantSelect || !intervalSelect || !startInput || !endInput || !refreshBtn || !totalEl || !passEl || !failEl || !passRateEl || !statusEl) {
     console.error('Production Output page markup is missing required elements.');
@@ -372,6 +459,10 @@ async function init() {
   setDefaultRange();
   await loadVariants();
   await refresh();
+
+  window.addEventListener('resize', function () {
+    renderOutputChart(currentChartBuckets, currentChartInterval);
+  });
 }
 
 if (document.readyState === 'loading') {

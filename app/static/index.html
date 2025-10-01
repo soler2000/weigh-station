@@ -24,7 +24,7 @@
     .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
     .kpis{display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:12px;margin-top:12px}
     .kpis .num{font-weight:700;font-size:clamp(20px,3.5vw,32px);text-align:center}
-    .footer-msg{min-height:1.4em;margin-top:8px}
+    .status-msg{min-height:2.4em;margin-bottom:18px;font-size:2rem;line-height:1.2;font-weight:600;text-align:center;color:#e2e8f0}
   </style>
 </head>
 <body class="app dark">
@@ -48,6 +48,7 @@
     <div class="layout">
       <!-- Left: live reading -->
       <section class="card reading-card" id="readingCard">
+        <div id="msg" class="status-msg"></div>
         <div id="reading" class="reading">0.0 g</div>
         <div id="readingSub" class="reading-sub">Waiting for scale…</div>
       </section>
@@ -90,8 +91,6 @@
           <div class="card" style="padding:10px"><div style="opacity:.7">Fail</div><div id="failCount" class="num">0</div></div>
           <div class="card" style="padding:10px"><div style="opacity:.7">Total</div><div id="totalCount" class="num">0</div></div>
         </div>
-
-        <div id="msg" class="footer-msg"></div>
       </section>
     </div>
   </main>
