@@ -28,8 +28,26 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 ### Run as a service
 
-To keep the application running automatically on boot, install the provided
-`weigh-station.service` unit:
+To keep the application running automatically on boot, run the installer script
+from the project root (requires `sudo`):
+
+```bash
+sudo ./install_service.sh
+```
+
+The script copies the `weigh-station.service` unit into `/etc/systemd/system`,
+adjusting the service user, group, working directory, and virtual environment
+paths automatically based on the current checkout. It also enables and starts
+the service immediately.
+
+You can override defaults with flags, e.g.
+
+```bash
+sudo ./install_service.sh --user pi --group pi --working-dir /home/pi/weigh-station --venv /home/pi/weigh-station/.venv --port 6000
+```
+
+If you prefer to install the unit manually, copy the provided
+`weigh-station.service` file:
 
 ```bash
 sudo cp weigh-station.service /etc/systemd/system/
