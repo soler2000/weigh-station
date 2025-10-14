@@ -112,6 +112,20 @@ def _fail_condition_expr():
         normalized == "no",
         normalized == "n",
     )
+
+
+def _parse_dt_param(value: Optional[str], *, is_start: bool) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        try:
+            parsed_date = date.fromisoformat(value)
+        except ValueError as exc:
+            raise HTTPException(400, "Invalid date format. Use YYYY-MM-DD or ISO 8601 timestamps.") from exc
+        boundary = time.min if is_start else time.max
+        return datetime.combine(parsed_date, boundary)
 # --- Pydantic DTOs
 class VariantIn(BaseModel):
     name: str = Field(..., max_length=64)
@@ -133,6 +147,7 @@ class WeighEventOut(BaseModel):
     id: int
     ts: str
     variant_id: int
+    variant_name: Optional[str] = None
     moulding_serial: Optional[str] = None
     serial: str
     contract: Optional[str] = None
@@ -143,6 +158,12 @@ class WeighEventOut(BaseModel):
     gross_g: float
     net_g: float
     in_range: bool
+
+
+class WeighEventListOut(BaseModel):
+    items: List[WeighEventOut]
+    count: int
+    has_more: bool = False
 # --- Scale reader boot
 reader = ScaleReader()  # pin names via env: DATA_PIN, CLOCK_PIN
 with Session() as s:
@@ -465,6 +486,7 @@ def commit(
             id=evt.id,
             ts=evt.ts.isoformat(),
             variant_id=evt.variant_id,
+            variant_name=v.name,
             moulding_serial=evt.moulding_serial,
             serial=evt.serial,
             contract=evt.contract,
@@ -741,20 +763,8 @@ def export_csv(
     frm = frm or request.query_params.get("frm")
     operator = (operator or "").strip() or None
 
-    def parse_dt(value: Optional[str], is_start: bool) -> Optional[datetime]:
-        if not value:
-            return None
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            try:
-                d = date.fromisoformat(value)
-            except ValueError:
-                raise HTTPException(400, "Invalid date format. Use YYYY-MM-DD or ISO 8601 timestamps.")
-            return datetime.combine(d, time.min if is_start else time.max)
-
-    start_dt = parse_dt(frm, True)
-    end_dt = parse_dt(to, False)
+    start_dt = _parse_dt_param(frm, is_start=True)
+    end_dt = _parse_dt_param(to, is_start=False)
     if start_dt and end_dt and end_dt < start_dt:
         raise HTTPException(400, '"to" must be on or after "from".')
     output = io.StringIO()
@@ -803,6 +813,76 @@ def export_csv(
     output.seek(0)
     return StreamingResponse(output, media_type="text/csv",
                              headers={"Content-Disposition": "attachment; filename=weigh_export.csv"})
+
+
+@app.get("/api/export/events", response_model=WeighEventListOut)
+def list_export_events(
+    request: Request,
+    frm: Optional[str] = Query(default=None, alias="from"),
+    to: Optional[str] = None,
+    variant: Optional[int] = None,
+    operator: Optional[str] = None,
+    limit: int = Query(200, ge=1, le=1000),
+):
+    frm = frm or request.query_params.get("frm")
+    operator_clean = (operator or "").strip() or None
+    start_dt = _parse_dt_param(frm, is_start=True)
+    end_dt = _parse_dt_param(to, is_start=False)
+    if start_dt and end_dt and end_dt < start_dt:
+        raise HTTPException(400, '"to" must be on or after "from".')
+
+    with Session() as s:
+        q = (
+            s.query(WeighEvent, Variant)
+            .join(Variant, Variant.id == WeighEvent.variant_id)
+        )
+        if variant:
+            q = q.filter(WeighEvent.variant_id == variant)
+        if operator_clean:
+            q = q.filter(WeighEvent.operator == operator_clean)
+        if start_dt:
+            q = q.filter(WeighEvent.ts >= start_dt)
+        if end_dt:
+            q = q.filter(WeighEvent.ts <= end_dt)
+
+        q = q.order_by(WeighEvent.ts.desc())
+        rows = q.limit(limit + 1).all()
+        has_more = len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+
+        items = [
+            WeighEventOut(
+                id=evt.id,
+                ts=evt.ts.isoformat(),
+                variant_id=evt.variant_id,
+                variant_name=var.name,
+                moulding_serial=evt.moulding_serial,
+                serial=evt.serial,
+                contract=evt.contract,
+                order_number=evt.order_number,
+                operator=evt.operator,
+                colour=evt.colour,
+                notes=evt.notes,
+                gross_g=evt.gross_g,
+                net_g=evt.net_g,
+                in_range=evt.in_range,
+            )
+            for evt, var in rows
+        ]
+
+    return WeighEventListOut(items=items, count=len(items), has_more=has_more)
+
+
+@app.delete("/api/export/events/{event_id}")
+def delete_export_event(event_id: int):
+    with Session() as s:
+        evt = s.get(WeighEvent, event_id)
+        if not evt:
+            raise HTTPException(404, "Event not found")
+        s.delete(evt)
+        s.commit()
+    return {"ok": True, "id": event_id}
 # Debug: latest reading (for polling fallback / quick checks)
 @app.get("/api/debug/latest")
 def debug_latest():
