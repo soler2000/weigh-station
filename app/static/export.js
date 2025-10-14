@@ -114,6 +114,15 @@ function formatNetWeight(value) {
   return value.toFixed(2);
 }
 
+function formatResult(evt) {
+  if (!evt) return 'Unknown';
+  const label = typeof evt.result_label === 'string' ? evt.result_label.trim() : '';
+  if (label) return label;
+  if (evt.in_range === true) return 'Pass';
+  if (evt.in_range === false) return 'Fail';
+  return 'Unknown';
+}
+
 function renderResults(payload) {
   if (!resultsSection || !resultsBody || !resultsSummary || !resultsEmpty || !resultsTableWrapper) {
     return;
@@ -148,7 +157,7 @@ function renderResults(payload) {
       evt.serial || '—',
       evt.operator || '—',
       formatNetWeight(evt.net_g),
-      evt.in_range ? 'Pass' : 'Fail',
+      formatResult(evt),
     ];
 
     for (const text of cells) {

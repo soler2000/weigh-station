@@ -1,5 +1,5 @@
 import asyncio, csv, io, os
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from pathlib import Path
 from datetime import date, datetime, timedelta, time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request, Path as FPath
@@ -114,6 +114,65 @@ def _fail_condition_expr():
     )
 
 
+_PASS_STRINGS = {
+    "true",
+    "t",
+    "pass",
+    "passed",
+    "p",
+    "yes",
+    "y",
+    "1",
+    "ok",
+    "good",
+    "accept",
+    "accepted",
+    "success",
+}
+_FAIL_STRINGS = {
+    "false",
+    "f",
+    "fail",
+    "failed",
+    "no",
+    "n",
+    "0",
+    "reject",
+    "rejected",
+    "ng",
+    "scrap",
+    "bad",
+}
+
+
+def _normalize_in_range(value: Any) -> Tuple[Optional[bool], str]:
+    """Coerce legacy pass/fail representations into a boolean and display label."""
+
+    if value is None:
+        return None, "Unknown"
+    if isinstance(value, bool):
+        return value, "Pass" if value else "Fail"
+    if isinstance(value, (int, float)):
+        bool_value = bool(value)
+        return bool_value, "Pass" if bool_value else "Fail"
+
+    text = str(value).strip()
+    if not text:
+        return None, "Unknown"
+    lowered = text.lower()
+    if lowered in _PASS_STRINGS:
+        return True, "Pass"
+    if lowered in _FAIL_STRINGS:
+        return False, "Fail"
+    for token in _PASS_STRINGS:
+        if lowered.startswith(f"{token} "):
+            return True, "Pass"
+    for token in _FAIL_STRINGS:
+        if lowered.startswith(f"{token} "):
+            return False, "Fail"
+    return None, text
+
+
 def _parse_dt_param(value: Optional[str], *, is_start: bool) -> Optional[datetime]:
     if not value:
         return None
@@ -157,7 +216,8 @@ class WeighEventOut(BaseModel):
     notes: Optional[str] = None
     gross_g: float
     net_g: float
-    in_range: bool
+    in_range: Optional[bool] = None
+    result_label: str
 
 
 class WeighEventListOut(BaseModel):
@@ -482,6 +542,7 @@ def commit(
             s.add(evt)
             s.commit()
             s.refresh(evt)
+        normalized_result, result_label = _normalize_in_range(evt.in_range)
         return WeighEventOut(
             id=evt.id,
             ts=evt.ts.isoformat(),
@@ -496,7 +557,8 @@ def commit(
             notes=evt.notes,
             gross_g=evt.gross_g,
             net_g=evt.net_g,
-            in_range=evt.in_range,
+            in_range=normalized_result,
+            result_label=result_label,
         )
 # --- Stats (pass/fail counters, optional by variant)
 @app.get("/api/stats")
@@ -851,7 +913,16 @@ def list_export_events(
         if has_more:
             rows = rows[:limit]
 
-        items = [
+        normalized_rows = [
+            (
+                evt,
+                var,
+                *_normalize_in_range(evt.in_range),
+            )
+            for evt, var in rows
+        ]
+
+        payload_items = [
             WeighEventOut(
                 id=evt.id,
                 ts=evt.ts.isoformat(),
@@ -866,12 +937,13 @@ def list_export_events(
                 notes=evt.notes,
                 gross_g=evt.gross_g,
                 net_g=evt.net_g,
-                in_range=evt.in_range,
+                in_range=in_range_bool,
+                result_label=result_label,
             )
-            for evt, var in rows
+            for evt, var, in_range_bool, result_label in normalized_rows
         ]
 
-    return WeighEventListOut(items=items, count=len(items), has_more=has_more)
+    return WeighEventListOut(items=payload_items, count=len(payload_items), has_more=has_more)
 
 
 @app.delete("/api/export/events/{event_id}")
