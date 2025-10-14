@@ -1,5 +1,7 @@
 const variantTbody = document.querySelector('#variants tbody');
 const colourTbody = document.querySelector('#colours tbody');
+const colourSummaryTbody = document.querySelector('#colourChoices tbody');
+const colourSummaryEmpty = document.getElementById('colourSummaryEmpty');
 
 async function loadVariantTable() {
   const vs = await (await fetch('/api/variants')).json();
@@ -55,12 +57,22 @@ async function loadColourTable() {
       alert('Unable to load colours. Please refresh and try again.');
       return;
     }
-    const rows = await res.json();
-    colourTbody.innerHTML = rows.map(r => colourRowHtml(r)).join('');
+    let rows = await res.json();
+    if (rows && Array.isArray(rows.items)) rows = rows.items;
+    const list = Array.isArray(rows) ? rows : [];
+    colourTbody.innerHTML = list.map(r => colourRowHtml(r)).join('');
     bindColourRowHandlers();
+    if (colourSummaryTbody) {
+      colourSummaryTbody.innerHTML = list.map(r => colourSummaryRowHtml(r)).join('');
+    }
+    if (colourSummaryEmpty) {
+      colourSummaryEmpty.hidden = list.length > 0;
+    }
   } catch (err) {
     console.error('Error loading colours', err);
     colourTbody.innerHTML = '';
+    if (colourSummaryTbody) colourSummaryTbody.innerHTML = '';
+    if (colourSummaryEmpty) colourSummaryEmpty.hidden = false;
     alert('Unable to load colours. Please check the connection and retry.');
   }
 }
@@ -74,6 +86,10 @@ function colourRowHtml(row) {
       <button class="del">Delete</button>
     </td>
   </tr>`;
+}
+
+function colourSummaryRowHtml(row) {
+  return `<tr><td>${escapeHtml(row.name)}</td></tr>`;
 }
 
 function bindColourRowHandlers() {

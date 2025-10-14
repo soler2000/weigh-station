@@ -48,17 +48,32 @@
 
       <section class="card">
         <h2>Colours</h2>
-        <table id="colours">
-          <thead>
-            <tr><th>ID</th><th>Name</th><th></th></tr>
-          </thead>
-          <tbody></tbody>
-        </table>
+        <p class="muted" style="margin-top:0;margin-bottom:12px;">Manage the selectable colours for weighing.</p>
+        <div class="table-scroll">
+          <table id="colours">
+            <caption class="sr-only">Editable list of selectable colours</caption>
+            <thead>
+              <tr><th scope="col">ID</th><th scope="col">Name</th><th scope="col"></th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
         <div class="row">
           <input id="c-name" placeholder="Colour name">
           <button id="c-add">Add</button>
-          <span class="muted">Manage the selectable colours for weighing.</span>
+          <span class="muted">Add or rename colours using the table above.</span>
         </div>
+        <h3 style="margin:20px 0 8px;">Selectable colours overview</h3>
+        <div class="table-scroll compact">
+          <table id="colourChoices" class="compact">
+            <caption class="sr-only">Summary of selectable colours</caption>
+            <thead>
+              <tr><th scope="col">Colour</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p id="colourSummaryEmpty" class="muted" style="margin-top:8px;" hidden>No colours configured yet.</p>
       </section>
 
       <section class="card">
