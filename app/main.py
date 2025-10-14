@@ -7,8 +7,9 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, select, func, case, or_, cast, String
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
-from app.models import Base, Variant, Calibration, WeighEvent
+from app.models import Base, Variant, Calibration, WeighEvent, Colour
 from app.hx711_reader import ScaleReader, ADCNotReadyError
 from app.filters import DriftFilter  # added for drift filter
 DRIFT_FILTER = DriftFilter()  # singleton drift filter
@@ -36,6 +37,20 @@ def _ensure_schema_migrations() -> None:
     }
 
     with engine.begin() as conn:
+        # Ensure the dedicated colours lookup table exists for the settings UI.
+        colours_table = conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='colours'"
+        ).fetchone()
+        if not colours_table:
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE colours (
+                    id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT    NOT NULL UNIQUE
+                )
+                """
+            )
+
         existing_weigh_event_cols = {
             row[1]
             for row in conn.exec_driver_sql("PRAGMA table_info(weigh_events)").fetchall()
@@ -105,6 +120,14 @@ class VariantIn(BaseModel):
     unit: str = "g"
     enabled: bool = True
 class VariantOut(VariantIn):
+    id: int
+
+
+class ColourIn(BaseModel):
+    name: str = Field(..., max_length=64)
+
+
+class ColourOut(ColourIn):
     id: int
 class WeighEventOut(BaseModel):
     id: int
@@ -250,6 +273,78 @@ def delete_variant(variant_id: int = FPath(..., ge=1)):
         if not row: raise HTTPException(404, "Variant not found")
         s.delete(row); s.commit()
     return {"ok": True}
+
+
+@app.get("/api/colours", response_model=List[ColourOut])
+def list_colours():
+    with Session() as s:
+        rows = (
+            s.query(Colour)
+            .order_by(func.lower(Colour.name).asc(), Colour.id.asc())
+            .all()
+        )
+        return [ColourOut(id=row.id, name=row.name) for row in rows]
+
+
+@app.post("/api/colours", response_model=ColourOut, status_code=201)
+def create_colour(payload: ColourIn):
+    name_clean = (payload.name or "").strip()
+    if not name_clean:
+        raise HTTPException(400, "Colour name cannot be blank.")
+    with Session() as s:
+        existing = (
+            s.query(Colour)
+            .filter(func.lower(Colour.name) == name_clean.lower())
+            .first()
+        )
+        if existing:
+            raise HTTPException(409, "Colour already exists.")
+        row = Colour(name=name_clean)
+        s.add(row)
+        try:
+            s.commit()
+        except IntegrityError as exc:
+            s.rollback()
+            raise HTTPException(409, "Colour already exists.") from exc
+        s.refresh(row)
+        return ColourOut(id=row.id, name=row.name)
+
+
+@app.put("/api/colours/{colour_id}", response_model=ColourOut)
+def update_colour(colour_id: int = FPath(..., ge=1), payload: ColourIn = ...):
+    name_clean = (payload.name or "").strip()
+    if not name_clean:
+        raise HTTPException(400, "Colour name cannot be blank.")
+    with Session() as s:
+        row = s.get(Colour, colour_id)
+        if not row:
+            raise HTTPException(404, "Colour not found")
+        duplicate = (
+            s.query(Colour)
+            .filter(func.lower(Colour.name) == name_clean.lower(), Colour.id != colour_id)
+            .first()
+        )
+        if duplicate:
+            raise HTTPException(409, "Colour already exists.")
+        row.name = name_clean
+        try:
+            s.commit()
+        except IntegrityError as exc:
+            s.rollback()
+            raise HTTPException(409, "Colour already exists.") from exc
+        s.refresh(row)
+        return ColourOut(id=row.id, name=row.name)
+
+
+@app.delete("/api/colours/{colour_id}")
+def delete_colour(colour_id: int = FPath(..., ge=1)):
+    with Session() as s:
+        row = s.get(Colour, colour_id)
+        if not row:
+            raise HTTPException(404, "Colour not found")
+        s.delete(row)
+        s.commit()
+    return {"ok": True}
 # --- Calibration
 @app.post("/api/calibrate/tare")
 def tare():
@@ -303,6 +398,7 @@ def commit(
     order_number: Optional[str] = Query(default=None),
     colour: Optional[str] = Query(default=None),
     notes: Optional[str] = Query(default=None),
+    overwrite: bool = Query(False, description="Update existing record when serial already exists"),
 ):
     serial = (serial or "").strip()
     if not serial:
@@ -324,10 +420,13 @@ def commit(
     colour_clean = _clean(colour)
     notes_clean = _clean(notes, preserve_newlines=True)
     with Session() as s:
-        # Enforce global uniqueness of serial across all variants
+        # Enforce global uniqueness of serial across all variants unless overwrite requested
         dup = s.query(WeighEvent).filter(WeighEvent.serial == serial).first()
-        if dup:
-            raise HTTPException(409, "Serial already used.")
+        if dup and not overwrite:
+            raise HTTPException(
+                status_code=409,
+                detail={"message": "Serial already used.", "id": dup.id},
+            )
         v = s.get(Variant, variant_id)
         if not v:
             raise HTTPException(404, "Variant not found")
@@ -336,7 +435,7 @@ def commit(
         in_range = (v.min_g <= g <= v.max_g)
         net_g = float(DRIFT_FILTER.update(g))
         raw_avg = int(latest.get("raw", 0))
-        evt = WeighEvent(
+        payload = dict(
             variant_id=variant_id,
             moulding_serial=moulding_clean,
             serial=serial,
@@ -350,7 +449,18 @@ def commit(
             in_range=in_range,
             raw_avg=raw_avg,
         )
-        s.add(evt); s.commit(); s.refresh(evt)
+        if dup:
+            for key, value in payload.items():
+                setattr(dup, key, value)
+            dup.ts = datetime.utcnow()
+            s.commit()
+            s.refresh(dup)
+            evt = dup
+        else:
+            evt = WeighEvent(**payload)
+            s.add(evt)
+            s.commit()
+            s.refresh(evt)
         return WeighEventOut(
             id=evt.id,
             ts=evt.ts.isoformat(),
@@ -723,6 +833,7 @@ def factory_reset(confirm: str = Query(..., description='Type "RESET" to confirm
         s.query(WeighEvent).delete()
         s.query(Calibration).delete()
         s.query(Variant).delete()
+        s.query(Colour).delete()
         s.commit()
         # Reseed 4 defaults so the UI has something to select
         s.add_all([

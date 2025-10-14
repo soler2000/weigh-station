@@ -24,6 +24,11 @@ class Calibration(Base):
     scale_factor: Mapped[float] = mapped_column(Float)  # counts per gram
     notes: Mapped[Optional[str]] = mapped_column(String(200))
 
+class Colour(Base):
+    __tablename__ = "colours"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True)
+
 class WeighEvent(Base):
     __tablename__ = "weigh_events"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)

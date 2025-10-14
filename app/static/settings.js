@@ -1,12 +1,27 @@
-const tbody = document.querySelector('#variants tbody');
+const variantTbody = document.querySelector('#variants tbody');
+let colourTbody = null;
+let colourSummaryTbody = null;
+let colourSummaryEmpty = null;
 
-async function loadTable() {
-  const vs = await (await fetch('/api/variants')).json();
-  tbody.innerHTML = vs.map(v => rowHtml(v)).join('');
-  bindRowHandlers();
+function ensureColourElements() {
+  if (!colourTbody) {
+    colourTbody = document.querySelector('#colours tbody');
+  }
+  if (!colourSummaryTbody) {
+    colourSummaryTbody = document.querySelector('#colourChoices tbody');
+  }
+  if (!colourSummaryEmpty) {
+    colourSummaryEmpty = document.getElementById('colourSummaryEmpty');
+  }
 }
 
-function rowHtml(v) {
+async function loadVariantTable() {
+  const vs = await (await fetch('/api/variants')).json();
+  variantTbody.innerHTML = vs.map(v => variantRowHtml(v)).join('');
+  bindVariantRowHandlers();
+}
+
+function variantRowHtml(v) {
   return `<tr data-id="${v.id}">
     <td>${v.id}</td>
     <td><input class="name" value="${escapeHtml(v.name)}"></td>
@@ -19,8 +34,8 @@ function rowHtml(v) {
   </tr>`;
 }
 
-function bindRowHandlers() {
-  tbody.querySelectorAll('.save').forEach(btn => btn.onclick = async (e) => {
+function bindVariantRowHandlers() {
+  variantTbody.querySelectorAll('.save').forEach(btn => btn.onclick = async (e) => {
     const tr = e.target.closest('tr');
     const id = tr.dataset.id;
     const body = {
@@ -36,12 +51,92 @@ function bindRowHandlers() {
     });
     if (!res.ok) alert('Save failed');
   });
-  tbody.querySelectorAll('.del').forEach(btn => btn.onclick = async (e) => {
+  variantTbody.querySelectorAll('.del').forEach(btn => btn.onclick = async (e) => {
     const tr = e.target.closest('tr');
     const id = tr.dataset.id;
     if (!confirm('Delete this variant?')) return;
     const res = await fetch(`/api/variants/${id}`, { method: 'DELETE' });
     if (res.ok) tr.remove(); else alert('Delete failed');
+  });
+}
+
+async function loadColourTable() {
+  ensureColourElements();
+  if (!colourTbody) return;
+  try {
+    const url = `/api/colours?ts=${Date.now()}`;
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) {
+      console.error('Failed to load colours', res.status);
+      colourTbody.innerHTML = '';
+      if (colourSummaryTbody) colourSummaryTbody.innerHTML = '';
+      if (colourSummaryEmpty) colourSummaryEmpty.hidden = false;
+      alert('Unable to load colours. Please refresh and try again.');
+      return;
+    }
+    let rows = await res.json();
+    if (rows && Array.isArray(rows.items)) rows = rows.items;
+    const list = Array.isArray(rows) ? rows : [];
+    colourTbody.innerHTML = list.map(r => colourRowHtml(r)).join('');
+    bindColourRowHandlers();
+    if (colourSummaryTbody) {
+      colourSummaryTbody.innerHTML = list.map(r => colourSummaryRowHtml(r)).join('');
+    }
+    if (colourSummaryEmpty) {
+      colourSummaryEmpty.hidden = list.length > 0;
+    }
+  } catch (err) {
+    console.error('Error loading colours', err);
+    colourTbody.innerHTML = '';
+    if (colourSummaryTbody) colourSummaryTbody.innerHTML = '';
+    if (colourSummaryEmpty) colourSummaryEmpty.hidden = false;
+    alert('Unable to load colours. Please check the connection and retry.');
+  }
+}
+
+function colourRowHtml(row) {
+  return `<tr data-id="${row.id}">
+    <td>${row.id}</td>
+    <td><input class="name" value="${escapeHtml(row.name)}"></td>
+    <td>
+      <button class="save">Save</button>
+      <button class="del">Delete</button>
+    </td>
+  </tr>`;
+}
+
+function colourSummaryRowHtml(row) {
+  return `<tr><td>${escapeHtml(row.name)}</td></tr>`;
+}
+
+function bindColourRowHandlers() {
+  ensureColourElements();
+  if (!colourTbody) return;
+  colourTbody.querySelectorAll('.save').forEach(btn => btn.onclick = async (e) => {
+    const tr = e.target.closest('tr');
+    const id = tr.dataset.id;
+    const name = tr.querySelector('.name').value.trim();
+    if (!name) { alert('Enter a colour name.'); return; }
+    const res = await fetch(`/api/colours/${id}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name })
+    });
+    if (res.ok) {
+      await loadColourTable();
+    } else {
+      alert('Save failed');
+    }
+  });
+  colourTbody.querySelectorAll('.del').forEach(btn => btn.onclick = async (e) => {
+    const tr = e.target.closest('tr');
+    const id = tr.dataset.id;
+    if (!confirm('Delete this colour?')) return;
+    const res = await fetch(`/api/colours/${id}`, { method: 'DELETE' });
+    if (res.ok) {
+      await loadColourTable();
+    } else {
+      alert('Delete failed');
+    }
   });
 }
 
@@ -62,8 +157,25 @@ document.getElementById('v-add').onclick = async () => {
     document.getElementById('v-name').value = '';
     document.getElementById('v-min').value = '';
     document.getElementById('v-max').value = '';
-    loadTable();
+    loadVariantTable();
   } else alert('Add failed');
+};
+
+document.getElementById('c-add').onclick = async () => {
+  const name = document.getElementById('c-name').value.trim();
+  if (!name) return alert('Enter a colour name');
+  const res = await fetch('/api/colours', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name })
+  });
+  if (res.ok) {
+    document.getElementById('c-name').value = '';
+    await loadColourTable();
+  } else if (res.status === 409) {
+    alert('Colour already exists.');
+  } else {
+    alert('Add failed');
+  }
 };
 
 document.getElementById('btn-del-events').onclick = async () => {
@@ -79,10 +191,15 @@ document.getElementById('btn-factory-reset').onclick = async () => {
   const res = await fetch('/api/admin/factory-reset?confirm=RESET', { method: 'POST' });
   if (res.ok) {
     alert('Factory reset complete. Variants reseeded.');
-    loadTable();
+    loadVariantTable();
+    loadColourTable();
   } else {
     alert('Factory reset failed.');
   }
 };
 
-window.addEventListener('load', loadTable);
+window.addEventListener('load', () => {
+  ensureColourElements();
+  loadVariantTable();
+  loadColourTable();
+});

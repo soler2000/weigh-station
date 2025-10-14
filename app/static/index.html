@@ -72,7 +72,9 @@
           <input id="operator" type="text" placeholder="Operator name">
 
           <label for="colour">Colour</label>
-          <input id="colour" type="text" placeholder="Colour">
+          <select id="colour">
+            <option value="">Select colour</option>
+          </select>
 
           <label for="finalSerial">Final Serial</label>
           <input id="finalSerial" type="text" placeholder="Scan or enter final serial" autocomplete="off">
@@ -110,10 +112,18 @@ const STICKY_TTL_MS = 30 * 60 * 1000;
 
 function fmtG(x){ return (Math.round(x*10)/10).toFixed(1)+' g'; }
 function setMsg(t, ok=true){ const m=$('msg'); if(!m) return; m.textContent=t||''; m.style.color = ok ? '' : '#b00'; }
-function tint(ok){
-  const c = $('readingCard'); if(!c) return; c.classList.remove('status--pass','status--fail');
-  if(ok===true) c.classList.add('status--pass');
-  if(ok===false) c.classList.add('status--fail');
+function tint(weight, variant){
+  const card = $('readingCard');
+  if(!card) return;
+  card.classList.remove('status--pass','status--fail');
+  const g = Number(weight ?? 0);
+  if(Math.abs(g) < 5) return;
+  if(!variant) return;
+  if(g >= variant.min_g && g <= variant.max_g){
+    card.classList.add('status--pass');
+  } else {
+    card.classList.add('status--fail');
+  }
 }
 
 async function loadVariants(){
@@ -126,10 +136,16 @@ async function loadVariants(){
       o.value=it.id; o.textContent=`${it.name || ('Variant '+it.id)} [${it.min_g}..${it.max_g} g]`;
       sel.appendChild(o);
     }
-    if(v.length){ sel.value=v[0].id; currentVariant=v[0]; refreshStats(); }
+    if(v.length){
+      sel.value=v[0].id;
+      currentVariant=v[0];
+      tint(latestReading?.g ?? 0, currentVariant);
+      refreshStats();
+    }
     sel.addEventListener('change', ()=>{
       const id=parseInt(sel.value,10);
       currentVariant = v.find(x=>x.id===id) || null;
+      tint(latestReading?.g ?? 0, currentVariant);
       refreshStats();
     });
   }catch{ setMsg('Failed to load variants', false); }
@@ -150,10 +166,7 @@ function updateScreen(d){
       zeroPromptActive = false;
     }
   }
-  if(currentVariant){
-    const ok = (d.g >= currentVariant.min_g && d.g <= currentVariant.max_g);
-    tint(ok);
-  }
+  tint(d.g, currentVariant);
 }
 
 // WebSocket + polling fallback
@@ -192,6 +205,47 @@ function readSticky(){
   }
 }
 
+async function loadColours(){
+  try{
+    const url = `/api/colours?ts=${Date.now()}`;
+    const res = await fetch(url,{cache:'no-store'});
+    if(!res.ok) throw new Error('Colour request failed');
+    let items = await res.json();
+    if(items && Array.isArray(items.items)) items = items.items;
+    const sel = $('colour'); if(!sel) return;
+    const previous = sel.value;
+    const sticky = readSticky();
+    const stickyColour = sticky?.values?.colour ?? '';
+    sel.innerHTML = '<option value="">Select colour</option>';
+    const seen = new Set();
+    if(Array.isArray(items)){
+      for(const row of items){
+        const name = typeof row === 'string' ? row : (row?.name ?? '');
+        const clean = String(name).trim();
+        if(!clean || seen.has(clean)) continue;
+        const opt = document.createElement('option');
+        opt.value = clean;
+        opt.textContent = clean;
+        sel.appendChild(opt);
+        seen.add(clean);
+      }
+    }
+    const desired = stickyColour || previous;
+    if(desired && Array.from(sel.options).some(opt => opt.value === desired)){
+      sel.value = desired;
+    }
+  }catch(err){
+    const sel = $('colour');
+    if(sel){
+      const current = sel.value;
+      sel.innerHTML = '<option value="">Select colour</option>';
+      if(current && Array.from(sel.options).some(opt => opt.value === current)){
+        sel.value = current;
+      }
+    }
+  }
+}
+
 function clearStickyFields(clearInputs=true){
   localStorage.removeItem(STICKY_STORAGE_KEY);
   if(clearInputs){
@@ -214,7 +268,14 @@ function applyStickyFields(){
   for(const id of STICKY_FIELDS){
     if(Object.prototype.hasOwnProperty.call(values, id)){
       const el = $(id);
-      if(el) el.value = values[id] ?? '';
+      if(!el) continue;
+      const value = values[id] ?? '';
+      if(el.tagName === 'SELECT'){
+        const match = Array.from(el.options || []).some(opt => opt.value === value);
+        el.value = match ? value : '';
+      } else {
+        el.value = value;
+      }
     }
   }
 }
@@ -271,30 +332,55 @@ async function doSave(){
     params.set('colour', ($('colour')?.value || '').trim());
     params.set('notes', ($('notes')?.value || '').trim());
 
-    const res = await fetch(`/api/weigh/commit?${params.toString()}`, {method:'POST'});
-    if(res.status===409){ setMsg('Final serial already used', false); return; }
-    if(!res.ok){ setMsg('Save failed', false); return; }
-    setMsg('Saved – remove product and return the scale to zero.');
-    zeroPromptActive = true;
-    requireZeroReset = true;
-    if(finalSerialEl) finalSerialEl.value='';
-    const notesEl = $('notes');
-    if(notesEl) notesEl.value='';
-    persistStickyFields();
-    refreshStats();
-    finalSerialEl?.focus();
+    const submit = (searchParams) => fetch(`/api/weigh/commit?${searchParams}`, {method:'POST'});
+    const onSuccess = () => {
+      setMsg('Saved – remove product and return the scale to zero.');
+      zeroPromptActive = true;
+      requireZeroReset = true;
+      if(finalSerialEl) finalSerialEl.value='';
+      const notesEl = $('notes');
+      if(notesEl) notesEl.value='';
+      persistStickyFields();
+      refreshStats();
+      finalSerialEl?.focus();
+    };
+
+    const initialRes = await submit(params.toString());
+    if(initialRes.status === 409){
+      let detail = null;
+      try{ detail = await initialRes.json(); }catch{}
+      const message = (detail && typeof detail === 'object')
+        ? (detail.detail?.message || detail.message || detail.detail)
+        : null;
+      const promptMsg = message
+        ? `${message} Update the existing record with the new values?`
+        : 'Duplicate serial detected. Update the existing record with the new values?';
+      if(confirm(promptMsg)){
+        params.set('overwrite','true');
+        const overwriteRes = await submit(params.toString());
+        if(!overwriteRes.ok){ setMsg('Save failed', false); return; }
+        onSuccess();
+      } else {
+        setMsg('Save cancelled – existing record not updated.', false);
+        finalSerialEl?.focus();
+      }
+      return;
+    }
+    if(!initialRes.ok){ setMsg('Save failed', false); return; }
+    onSuccess();
   }catch{ setMsg('Save error', false); }
 }
 
-window.addEventListener('load', ()=>{
+window.addEventListener('load', async ()=>{
   checkStickyExpiry();
+  await loadColours();
   applyStickyFields();
   bindStickyHandlers();
   setInterval(checkStickyExpiry, 60000);
   loadVariants();
   setInterval(refreshStats, 3000);
   $('saveBtn')?.addEventListener('click', doSave);
-  $('finalSerial')?.addEventListener('keydown', ev=>{ if(ev.key==='Enter'){ ev.preventDefault(); doSave(); }});
+  $('finalSerial')?.addEventListener('keydown', ev=>{ if(ev.key==='Enter'){ ev.preventDefault(); }});
   $('finalSerial')?.focus();
 });
 </script>
