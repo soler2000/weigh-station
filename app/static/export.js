@@ -12,6 +12,7 @@ const resultsBody = document.getElementById('resultsBody');
 const resultsEmpty = document.getElementById('resultsEmpty');
 const resultsSummary = document.getElementById('resultsSummary');
 const resultsErrors = document.getElementById('resultsErrors');
+const defaultEmptyMessage = resultsEmpty?.textContent || 'No records match the selected filters.';
 
 function setStatus(message, isError = false) {
   if (!statusEl) return;
@@ -94,6 +95,7 @@ function clearResults() {
   }
   if (resultsEmpty) {
     resultsEmpty.hidden = true;
+    resultsEmpty.textContent = defaultEmptyMessage;
   }
   if (resultsTableWrapper) {
     resultsTableWrapper.hidden = true;
@@ -105,6 +107,53 @@ function clearResults() {
   if (resultsSection) {
     resultsSection.hidden = true;
   }
+}
+
+function focusResultsSection() {
+  if (!resultsSection) return;
+  requestAnimationFrame(() => {
+    resultsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+}
+
+function showLoadingState() {
+  if (!resultsSection) return;
+  resultsSection.hidden = false;
+  if (resultsSummary) {
+    resultsSummary.textContent = 'Loading records…';
+  }
+  if (resultsErrors) {
+    resultsErrors.hidden = true;
+    resultsErrors.textContent = '';
+  }
+  if (resultsTableWrapper) {
+    resultsTableWrapper.hidden = true;
+  }
+  if (resultsEmpty) {
+    resultsEmpty.hidden = false;
+    resultsEmpty.textContent = 'Loading…';
+  }
+  focusResultsSection();
+}
+
+function showErrorState(message) {
+  if (!resultsSection) return;
+  resultsSection.hidden = false;
+  if (resultsSummary) {
+    resultsSummary.textContent = '';
+  }
+  if (resultsTableWrapper) {
+    resultsTableWrapper.hidden = true;
+  }
+  if (resultsEmpty) {
+    resultsEmpty.hidden = false;
+    resultsEmpty.textContent = 'Unable to load records.';
+  }
+  if (resultsErrors) {
+    resultsErrors.textContent = message;
+    resultsErrors.hidden = false;
+  }
+  focusResultsSection();
 }
 
 function formatTimestamp(value) {
@@ -142,6 +191,9 @@ function renderResults(payload) {
   const hasMore = Boolean(payload?.has_more);
   const errors = Array.isArray(payload?.errors) ? payload.errors : [];
   resultsSection.hidden = false;
+  if (resultsEmpty) {
+    resultsEmpty.textContent = defaultEmptyMessage;
+  }
   resultsBody.innerHTML = '';
 
   if (items.length === 0) {
@@ -163,6 +215,7 @@ function renderResults(payload) {
         resultsErrors.textContent = '';
       }
     }
+    focusResultsSection();
     return;
   }
 
@@ -233,6 +286,7 @@ function renderResults(payload) {
 
     resultsBody.appendChild(row);
   }
+  focusResultsSection();
 }
 
 async function loadRecords() {
@@ -328,6 +382,7 @@ showBtn?.addEventListener('click', async () => {
   showBtn.disabled = true;
   showBtn.textContent = 'Loading…';
   setStatus('Loading records…');
+  showLoadingState();
   try {
     const payload = await loadRecords();
     if (!payload || payload.count === 0) {
@@ -352,6 +407,7 @@ showBtn?.addEventListener('click', async () => {
     console.error(err);
     const message = err instanceof Error && err.message ? err.message : 'Unable to load records.';
     setStatus(message, true);
+    showErrorState(message);
   } finally {
     showBtn.disabled = false;
     showBtn.textContent = originalText;
