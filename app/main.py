@@ -1,4 +1,4 @@
-import asyncio, csv, io, os
+import asyncio, csv, io, os, math
 import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
 from pathlib import Path
@@ -899,21 +899,39 @@ def list_export_events(
         raise HTTPException(400, '"to" must be on or after "from".')
 
     with Session() as s:
-        q = (
-            s.query(WeighEvent, Variant)
+        ts_expr = cast(WeighEvent.ts, String).label("ts_text")
+        stmt = (
+            select(
+                WeighEvent.id.label("id"),
+                ts_expr,
+                WeighEvent.variant_id.label("variant_id"),
+                Variant.name.label("variant_name"),
+                WeighEvent.moulding_serial.label("moulding_serial"),
+                WeighEvent.serial.label("serial"),
+                WeighEvent.contract.label("contract"),
+                WeighEvent.order_number.label("order_number"),
+                WeighEvent.operator.label("operator"),
+                WeighEvent.colour.label("colour"),
+                WeighEvent.notes.label("notes"),
+                WeighEvent.gross_g.label("gross_g"),
+                WeighEvent.net_g.label("net_g"),
+                WeighEvent.in_range.label("in_range"),
+            )
+            .select_from(WeighEvent)
             .join(Variant, Variant.id == WeighEvent.variant_id, isouter=True)
         )
-        if variant:
-            q = q.filter(WeighEvent.variant_id == variant)
-        if operator_clean:
-            q = q.filter(WeighEvent.operator == operator_clean)
-        if start_dt:
-            q = q.filter(WeighEvent.ts >= start_dt)
-        if end_dt:
-            q = q.filter(WeighEvent.ts <= end_dt)
 
-        q = q.order_by(WeighEvent.ts.desc())
-        rows = q.limit(limit + 1).all()
+        if variant:
+            stmt = stmt.where(WeighEvent.variant_id == variant)
+        if operator_clean:
+            stmt = stmt.where(WeighEvent.operator == operator_clean)
+        if start_dt:
+            stmt = stmt.where(WeighEvent.ts >= start_dt)
+        if end_dt:
+            stmt = stmt.where(WeighEvent.ts <= end_dt)
+
+        stmt = stmt.order_by(WeighEvent.ts.desc()).limit(limit + 1)
+        rows = s.execute(stmt).mappings().all()
         has_more = len(rows) > limit
         if has_more:
             rows = rows[:limit]
@@ -925,46 +943,106 @@ def list_export_events(
             if value in (None, "", " "):
                 return None
             try:
-                return float(value)
+                numeric = float(value)
             except (TypeError, ValueError) as exc:
                 message = f"Event {event_id} has invalid {label}: {value!r} ({exc})"
                 errors.append(message)
-                logger.exception(message)
+                logger.warning(message, exc_info=True)
                 return None
+            if math.isnan(numeric) or math.isinf(numeric):
+                message = f"Event {event_id} has non-finite {label}: {numeric!r}"
+                errors.append(message)
+                logger.warning(message)
+                return None
+            return numeric
 
-        def _serialize_ts(event: WeighEvent) -> Optional[str]:
-            ts_value = getattr(event, "ts", None)
-            if ts_value is None:
-                errors.append(f"Event {event.id} is missing a timestamp.")
+        def _coerce_int(value: Any, label: str, event_id: int) -> Optional[int]:
+            if value is None or value == "":
                 return None
             try:
-                return ts_value.isoformat()
-            except Exception as exc:  # pragma: no cover - defensive path
-                message = f"Event {event.id} timestamp could not be formatted: {exc}"
+                return int(value)
+            except (TypeError, ValueError) as exc:
+                message = f"Event {event_id} has invalid {label}: {value!r} ({exc})"
                 errors.append(message)
-                logger.exception(message)
+                logger.warning(message, exc_info=True)
                 return None
 
-        for evt, var in rows:
-            in_range_bool, result_label = _normalize_in_range(evt.in_range)
-            serial_value = (evt.serial or "").strip() or None
-            if serial_value is None:
-                errors.append(f"Event {evt.id} has an empty serial.")
+        def _coerce_text(
+            value: Any, label: str, event_id: int, *, allow_empty: bool = True
+        ) -> Optional[str]:
+            if value is None:
+                return None
+            if isinstance(value, bytes):
+                try:
+                    value = value.decode("utf-8")
+                except UnicodeDecodeError:
+                    decoded = value.decode("utf-8", errors="replace")
+                    message = (
+                        f"Event {event_id} had non-UTF8 {label}; characters were replaced for display."
+                    )
+                    errors.append(message)
+                    logger.warning(message)
+                    value = decoded
+            text_value = str(value).strip()
+            if not text_value:
+                if not allow_empty:
+                    errors.append(f"Event {event_id} has an empty {label}.")
+                return None
+            return text_value
+
+        def _format_timestamp(raw_value: Any, event_id: int) -> Optional[str]:
+            if raw_value in (None, "", " "):
+                errors.append(f"Event {event_id} is missing a timestamp.")
+                return None
+
+            if isinstance(raw_value, datetime):
+                return raw_value.isoformat()
+
+            text_value = str(raw_value).strip()
+            if not text_value:
+                errors.append(f"Event {event_id} has an empty timestamp value.")
+                return None
+
+            candidates = [text_value]
+            if "T" not in text_value and " " in text_value:
+                candidates.append(text_value.replace(" ", "T"))
+
+            for candidate in candidates:
+                try:
+                    return datetime.fromisoformat(candidate).isoformat()
+                except ValueError:
+                    continue
+
+            message = (
+                f"Event {event_id} timestamp could not be parsed; returning original value."
+            )
+            errors.append(message)
+            logger.warning(message)
+            return text_value
+
+        for row in rows:
+            event_id = _coerce_int(row.get("id"), "event id", row.get("id", 0)) or 0
+            in_range_bool, result_label = _normalize_in_range(row.get("in_range"))
+            serial_value = _coerce_text(row.get("serial"), "serial", event_id, allow_empty=False)
 
             item_data = dict(
-                id=int(evt.id),
-                ts=_serialize_ts(evt),
-                variant_id=getattr(evt, "variant_id", None),
-                variant_name=(var.name if var else None),
-                moulding_serial=(evt.moulding_serial or None),
+                id=event_id,
+                ts=_format_timestamp(row.get("ts_text"), event_id),
+                variant_id=_coerce_int(row.get("variant_id"), "variant id", event_id),
+                variant_name=_coerce_text(row.get("variant_name"), "variant name", event_id),
+                moulding_serial=_coerce_text(
+                    row.get("moulding_serial"), "moulding serial", event_id
+                ),
                 serial=serial_value,
-                contract=(evt.contract or None),
-                order_number=(evt.order_number or None),
-                operator=(evt.operator or None),
-                colour=(evt.colour or None),
-                notes=(evt.notes or None),
-                gross_g=_coerce_float(evt.gross_g, "gross weight", evt.id),
-                net_g=_coerce_float(evt.net_g, "net weight", evt.id),
+                contract=_coerce_text(row.get("contract"), "contract", event_id),
+                order_number=_coerce_text(
+                    row.get("order_number"), "order number", event_id
+                ),
+                operator=_coerce_text(row.get("operator"), "operator", event_id),
+                colour=_coerce_text(row.get("colour"), "colour", event_id),
+                notes=_coerce_text(row.get("notes"), "notes", event_id),
+                gross_g=_coerce_float(row.get("gross_g"), "gross weight", event_id),
+                net_g=_coerce_float(row.get("net_g"), "net weight", event_id),
                 in_range=in_range_bool,
                 result_label=result_label,
             )
@@ -972,9 +1050,11 @@ def list_export_events(
             try:
                 payload_items.append(WeighEventOut(**item_data))
             except Exception as exc:  # pragma: no cover - defensive
-                message = f"Event {item_data.get('id', 'unknown')} could not be serialised: {exc}"
+                message = (
+                    f"Event {item_data.get('id', 'unknown')} could not be serialised: {exc}"
+                )
                 errors.append(message)
-                logger.exception(message)
+                logger.warning(message, exc_info=True)
 
     return WeighEventListOut(
         items=payload_items,
