@@ -36,6 +36,20 @@ def _ensure_schema_migrations() -> None:
     }
 
     with engine.begin() as conn:
+        # Ensure the dedicated colours lookup table exists for the settings UI.
+        colours_table = conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='colours'"
+        ).fetchone()
+        if not colours_table:
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE colours (
+                    id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT    NOT NULL UNIQUE
+                )
+                """
+            )
+
         existing_weigh_event_cols = {
             row[1]
             for row in conn.exec_driver_sql("PRAGMA table_info(weigh_events)").fetchall()
