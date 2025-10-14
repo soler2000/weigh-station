@@ -12,9 +12,11 @@ const resultsBody = document.getElementById('resultsBody');
 const resultsEmpty = document.getElementById('resultsEmpty');
 const resultsSummary = document.getElementById('resultsSummary');
 const resultsErrors = document.getElementById('resultsErrors');
-const defaultEmptyMessage = resultsEmpty?.textContent || 'No records match the selected filters.';
+const defaultEmptyMessage = (resultsEmpty && resultsEmpty.textContent)
+  ? resultsEmpty.textContent
+  : 'No records match the selected filters.';
 
-function setStatus(message, isError = false) {
+function setStatus(message, isError) {
   if (!statusEl) return;
   statusEl.textContent = message || '';
   statusEl.style.color = isError ? '#f87171' : 'var(--app-fg-muted)';
@@ -35,7 +37,8 @@ async function loadVariants() {
     const variants = await res.json();
     variantSelect.innerHTML = '';
     appendOption(variantSelect, '', 'All variants');
-    for (const v of variants) {
+    for (let i = 0; i < variants.length; i += 1) {
+      const v = variants[i];
       const name = v.name || `Variant ${v.id}`;
       const range = `${v.min_g} – ${v.max_g} ${v.unit || 'g'}`;
       appendOption(variantSelect, String(v.id), `${name} [${range}]`);
@@ -54,7 +57,8 @@ async function loadOperators() {
     const operators = await res.json();
     operatorSelect.innerHTML = '';
     appendOption(operatorSelect, '', 'All operators');
-    for (const name of operators) {
+    for (let i = 0; i < operators.length; i += 1) {
+      const name = operators[i];
       appendOption(operatorSelect, name, name);
     }
   } catch (err) {
@@ -63,18 +67,22 @@ async function loadOperators() {
   }
 }
 
+function getFieldValue(element) {
+  return element ? element.value : '';
+}
+
 function buildQueryParams() {
   const params = new URLSearchParams();
-  const variant = variantSelect?.value;
+  const variant = getFieldValue(variantSelect);
   if (variant) params.set('variant', variant);
 
-  const operator = operatorSelect?.value;
+  const operator = getFieldValue(operatorSelect);
   if (operator) params.set('operator', operator);
 
-  const from = fromInput?.value;
+  const from = getFieldValue(fromInput);
   if (from) params.set('from', from);
 
-  const to = toInput?.value;
+  const to = getFieldValue(toInput);
   if (to) params.set('to', to);
 
   return params;
@@ -83,7 +91,7 @@ function buildQueryParams() {
 function buildUrl(basePath) {
   const params = buildQueryParams();
   const qs = params.toString();
-  return basePath + (qs ? `?${qs}` : '');
+  return qs ? `${basePath}?${qs}` : basePath;
 }
 
 function clearResults() {
@@ -187,13 +195,14 @@ function renderResults(payload) {
   if (!resultsSection || !resultsBody || !resultsSummary || !resultsEmpty || !resultsTableWrapper) {
     return;
   }
-  const items = Array.isArray(payload?.items) ? payload.items : [];
-  const hasMore = Boolean(payload?.has_more);
-  const errors = Array.isArray(payload?.errors) ? payload.errors : [];
+  const items = payload && Array.isArray(payload.items) ? payload.items : [];
+  const hasMore = payload && Object.prototype.hasOwnProperty.call(payload, 'has_more')
+    ? Boolean(payload.has_more)
+    : false;
+  const errors = payload && Array.isArray(payload.errors) ? payload.errors : [];
+
   resultsSection.hidden = false;
-  if (resultsEmpty) {
-    resultsEmpty.textContent = defaultEmptyMessage;
-  }
+  resultsEmpty.textContent = defaultEmptyMessage;
   resultsBody.innerHTML = '';
 
   if (items.length === 0) {
@@ -243,33 +252,37 @@ function renderResults(payload) {
     }
   }
 
-  for (const evt of items) {
+  for (let i = 0; i < items.length; i += 1) {
+    const evt = items[i];
     const row = document.createElement('tr');
     row.dataset.id = String(evt.id);
 
+    const variantLabel = (() => {
+      const hasVariantId = evt.variant_id !== null && evt.variant_id !== undefined;
+      if (evt.variant_name && hasVariantId) {
+        return `${evt.variant_name} (#${evt.variant_id})`;
+      }
+      if (evt.variant_name) {
+        return evt.variant_name;
+      }
+      if (hasVariantId) {
+        return `Variant ${evt.variant_id}`;
+      }
+      return 'Unknown variant';
+    })();
+
     const cells = [
       formatTimestamp(evt.ts),
-      (() => {
-        if (evt.variant_name && (evt.variant_id ?? null) !== null && evt.variant_id !== undefined) {
-          return `${evt.variant_name} (#${evt.variant_id})`;
-        }
-        if (evt.variant_name) {
-          return evt.variant_name;
-        }
-        if (evt.variant_id !== null && evt.variant_id !== undefined) {
-          return `Variant ${evt.variant_id}`;
-        }
-        return 'Unknown variant';
-      })(),
+      variantLabel,
       evt.serial || '—',
       evt.operator || '—',
       formatNetWeight(evt.net_g),
       formatResult(evt),
     ];
 
-    for (const text of cells) {
+    for (let j = 0; j < cells.length; j += 1) {
       const cell = document.createElement('td');
-      cell.textContent = text;
+      cell.textContent = cells[j];
       row.appendChild(cell);
     }
 
@@ -306,9 +319,14 @@ async function loadRecords() {
   if (!res.ok) {
     let detail = '';
     if (payload && typeof payload === 'object') {
-      if (payload.detail) {
+      if (Object.prototype.hasOwnProperty.call(payload, 'detail') && payload.detail) {
         if (Array.isArray(payload.detail)) {
-          detail = payload.detail.map((entry) => entry?.msg || String(entry)).join('; ');
+          detail = payload.detail.map((entry) => {
+            if (entry && typeof entry === 'object' && Object.prototype.hasOwnProperty.call(entry, 'msg')) {
+              return entry.msg || '';
+            }
+            return String(entry);
+          }).join('; ');
         } else {
           detail = String(payload.detail);
         }
@@ -323,7 +341,9 @@ async function loadRecords() {
     throw new Error(message);
   }
 
-  const safePayload = payload && typeof payload === 'object' ? payload : { items: [], count: 0, has_more: false, errors: [] };
+  const safePayload = (payload && typeof payload === 'object')
+    ? payload
+    : { items: [], count: 0, has_more: false, errors: [] };
   renderResults(safePayload);
   return safePayload;
 }
@@ -353,66 +373,72 @@ function attachDeleteHandler(button, id) {
   });
 }
 
-form?.addEventListener('submit', (event) => {
-  event.preventDefault();
-  const url = buildUrl('/export.csv');
-  setStatus('Preparing download…');
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = '';
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  setTimeout(() => setStatus(''), 2000);
-});
+if (form) {
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const url = buildUrl('/export.csv');
+    setStatus('Preparing download…');
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = '';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => setStatus(''), 2000);
+  });
+}
 
-resetBtn?.addEventListener('click', () => {
-  if (variantSelect) variantSelect.value = '';
-  if (operatorSelect) operatorSelect.value = '';
-  if (fromInput) fromInput.value = '';
-  if (toInput) toInput.value = '';
-  setStatus('Filters reset.');
-  setTimeout(() => setStatus(''), 2000);
-  clearResults();
-});
+if (resetBtn) {
+  resetBtn.addEventListener('click', () => {
+    if (variantSelect) variantSelect.value = '';
+    if (operatorSelect) operatorSelect.value = '';
+    if (fromInput) fromInput.value = '';
+    if (toInput) toInput.value = '';
+    setStatus('Filters reset.');
+    setTimeout(() => setStatus(''), 2000);
+    clearResults();
+  });
+}
 
-showBtn?.addEventListener('click', async () => {
-  if (!showBtn) return;
-  const originalText = showBtn.textContent;
-  showBtn.disabled = true;
-  showBtn.textContent = 'Loading…';
-  setStatus('Loading records…');
-  showLoadingState();
-  try {
-    const payload = await loadRecords();
-    if (!payload || payload.count === 0) {
-      const warning = Array.isArray(payload?.errors) && payload.errors.length
-        ? 'No records matched the filters, but warnings were reported. Review the console for details.'
-        : 'No records match the selected filters.';
-      setStatus(warning, Boolean(payload?.errors?.length));
-    } else {
-      let message = `Showing ${payload.count} record${payload.count === 1 ? '' : 's'}.`;
-      if (payload.has_more) {
-        message += ' Refine your filters to load additional results.';
-      }
-      if (Array.isArray(payload.errors) && payload.errors.length) {
-        message += ` ${payload.errors.length} warning${payload.errors.length === 1 ? '' : 's'} logged.`;
-        setStatus(message, true);
-        console.warn('Export preview warnings:', payload.errors);
+if (showBtn) {
+  showBtn.addEventListener('click', async () => {
+    const originalText = showBtn.textContent;
+    showBtn.disabled = true;
+    showBtn.textContent = 'Loading…';
+    setStatus('Loading records…');
+    showLoadingState();
+    try {
+      const payload = await loadRecords();
+      const hasErrors = payload && Array.isArray(payload.errors) && payload.errors.length > 0;
+      if (!payload || payload.count === 0) {
+        const warning = hasErrors
+          ? 'No records matched the filters, but warnings were reported. Review the console for details.'
+          : 'No records match the selected filters.';
+        setStatus(warning, hasErrors);
       } else {
-        setStatus(message);
+        let message = `Showing ${payload.count} record${payload.count === 1 ? '' : 's'}.`;
+        if (payload.has_more) {
+          message += ' Refine your filters to load additional results.';
+        }
+        if (hasErrors) {
+          message += ` ${payload.errors.length} warning${payload.errors.length === 1 ? '' : 's'} logged.`;
+          setStatus(message, true);
+          console.warn('Export preview warnings:', payload.errors);
+        } else {
+          setStatus(message);
+        }
       }
+    } catch (err) {
+      console.error(err);
+      const message = (err instanceof Error && err.message) ? err.message : 'Unable to load records.';
+      setStatus(message, true);
+      showErrorState(message);
+    } finally {
+      showBtn.disabled = false;
+      showBtn.textContent = originalText;
     }
-  } catch (err) {
-    console.error(err);
-    const message = err instanceof Error && err.message ? err.message : 'Unable to load records.';
-    setStatus(message, true);
-    showErrorState(message);
-  } finally {
-    showBtn.disabled = false;
-    showBtn.textContent = originalText;
-  }
-});
+  });
+}
 
 window.addEventListener('load', () => {
   loadVariants();
