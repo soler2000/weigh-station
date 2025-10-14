@@ -47,9 +47,22 @@ function bindVariantRowHandlers() {
 }
 
 async function loadColourTable() {
-  const rows = await (await fetch('/api/colours')).json();
-  colourTbody.innerHTML = rows.map(r => colourRowHtml(r)).join('');
-  bindColourRowHandlers();
+  try {
+    const res = await fetch('/api/colours', { cache: 'no-store' });
+    if (!res.ok) {
+      console.error('Failed to load colours', res.status);
+      colourTbody.innerHTML = '';
+      alert('Unable to load colours. Please refresh and try again.');
+      return;
+    }
+    const rows = await res.json();
+    colourTbody.innerHTML = rows.map(r => colourRowHtml(r)).join('');
+    bindColourRowHandlers();
+  } catch (err) {
+    console.error('Error loading colours', err);
+    colourTbody.innerHTML = '';
+    alert('Unable to load colours. Please check the connection and retry.');
+  }
 }
 
 function colourRowHtml(row) {
