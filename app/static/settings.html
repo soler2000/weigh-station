@@ -3,6 +3,9 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate"/>
+  <meta http-equiv="Pragma" content="no-cache"/>
+  <meta http-equiv="Expires" content="0"/>
   <title>Settings • Weigh Station</title>
   <link rel="stylesheet" href="/static/styles.css?v=app-theme-1">
 </head>
@@ -63,17 +66,6 @@
           <button id="c-add">Add</button>
           <span class="muted">Add or rename colours using the table above.</span>
         </div>
-        <h3 style="margin:20px 0 8px;">Selectable colours overview</h3>
-        <div class="table-scroll compact">
-          <table id="colourChoices" class="compact">
-            <caption class="sr-only">Summary of selectable colours</caption>
-            <thead>
-              <tr><th scope="col">Colour</th></tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-        <p id="colourSummaryEmpty" class="muted" style="margin-top:8px;" hidden>No colours configured yet.</p>
       </section>
 
       <section class="card">
@@ -89,6 +81,13 @@
     </div>
   </main>
 
-  <script src="/static/settings.js"></script>
+  <script>
+    window.addEventListener('pageshow', (event) => {
+      if (event.persisted) {
+        window.location.reload();
+      }
+    });
+  </script>
+  <script src="/static/settings.js?v=refresh-1"></script>
 </body>
 </html>
