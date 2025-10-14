@@ -1,5 +1,6 @@
-import asyncio, csv, io, os
-from typing import Dict, List, Optional, Set, Tuple
+import asyncio, csv, io, os, math
+import logging
+from typing import Any, Dict, List, Optional, Set, Tuple
 from pathlib import Path
 from datetime import date, datetime, timedelta, time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request, Path as FPath
@@ -74,6 +75,9 @@ def _ensure_schema_migrations() -> None:
 _ensure_schema_migrations()
 
 
+logger = logging.getLogger(__name__)
+
+
 app = FastAPI(title="Weigh Station")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -112,6 +116,79 @@ def _fail_condition_expr():
         normalized == "no",
         normalized == "n",
     )
+
+
+_PASS_STRINGS = {
+    "true",
+    "t",
+    "pass",
+    "passed",
+    "p",
+    "yes",
+    "y",
+    "1",
+    "ok",
+    "good",
+    "accept",
+    "accepted",
+    "success",
+}
+_FAIL_STRINGS = {
+    "false",
+    "f",
+    "fail",
+    "failed",
+    "no",
+    "n",
+    "0",
+    "reject",
+    "rejected",
+    "ng",
+    "scrap",
+    "bad",
+}
+
+
+def _normalize_in_range(value: Any) -> Tuple[Optional[bool], str]:
+    """Coerce legacy pass/fail representations into a boolean and display label."""
+
+    if value is None:
+        return None, "Unknown"
+    if isinstance(value, bool):
+        return value, "Pass" if value else "Fail"
+    if isinstance(value, (int, float)):
+        bool_value = bool(value)
+        return bool_value, "Pass" if bool_value else "Fail"
+
+    text = str(value).strip()
+    if not text:
+        return None, "Unknown"
+    lowered = text.lower()
+    if lowered in _PASS_STRINGS:
+        return True, "Pass"
+    if lowered in _FAIL_STRINGS:
+        return False, "Fail"
+    for token in _PASS_STRINGS:
+        if lowered.startswith(f"{token} "):
+            return True, "Pass"
+    for token in _FAIL_STRINGS:
+        if lowered.startswith(f"{token} "):
+            return False, "Fail"
+    return None, text
+
+
+def _parse_dt_param(value: Optional[str], *, is_start: bool) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        try:
+            parsed_date = date.fromisoformat(value)
+        except ValueError as exc:
+            raise HTTPException(400, "Invalid date format. Use YYYY-MM-DD or ISO 8601 timestamps.") from exc
+        boundary = time.min if is_start else time.max
+        return datetime.combine(parsed_date, boundary)
 # --- Pydantic DTOs
 class VariantIn(BaseModel):
     name: str = Field(..., max_length=64)
@@ -131,18 +208,27 @@ class ColourOut(ColourIn):
     id: int
 class WeighEventOut(BaseModel):
     id: int
-    ts: str
-    variant_id: int
+    ts: Optional[str] = None
+    variant_id: Optional[int] = None
+    variant_name: Optional[str] = None
     moulding_serial: Optional[str] = None
-    serial: str
+    serial: Optional[str] = None
     contract: Optional[str] = None
     order_number: Optional[str] = None
     operator: Optional[str] = None
     colour: Optional[str] = None
     notes: Optional[str] = None
-    gross_g: float
-    net_g: float
-    in_range: bool
+    gross_g: Optional[float] = None
+    net_g: Optional[float] = None
+    in_range: Optional[bool] = None
+    result_label: str
+
+
+class WeighEventListOut(BaseModel):
+    items: List[WeighEventOut]
+    count: int
+    has_more: bool = False
+    errors: List[str] = Field(default_factory=list)
 # --- Scale reader boot
 reader = ScaleReader()  # pin names via env: DATA_PIN, CLOCK_PIN
 with Session() as s:
@@ -461,10 +547,12 @@ def commit(
             s.add(evt)
             s.commit()
             s.refresh(evt)
+        normalized_result, result_label = _normalize_in_range(evt.in_range)
         return WeighEventOut(
             id=evt.id,
             ts=evt.ts.isoformat(),
             variant_id=evt.variant_id,
+            variant_name=v.name,
             moulding_serial=evt.moulding_serial,
             serial=evt.serial,
             contract=evt.contract,
@@ -474,7 +562,8 @@ def commit(
             notes=evt.notes,
             gross_g=evt.gross_g,
             net_g=evt.net_g,
-            in_range=evt.in_range,
+            in_range=normalized_result,
+            result_label=result_label,
         )
 # --- Stats (pass/fail counters, optional by variant)
 @app.get("/api/stats")
@@ -741,20 +830,8 @@ def export_csv(
     frm = frm or request.query_params.get("frm")
     operator = (operator or "").strip() or None
 
-    def parse_dt(value: Optional[str], is_start: bool) -> Optional[datetime]:
-        if not value:
-            return None
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            try:
-                d = date.fromisoformat(value)
-            except ValueError:
-                raise HTTPException(400, "Invalid date format. Use YYYY-MM-DD or ISO 8601 timestamps.")
-            return datetime.combine(d, time.min if is_start else time.max)
-
-    start_dt = parse_dt(frm, True)
-    end_dt = parse_dt(to, False)
+    start_dt = _parse_dt_param(frm, is_start=True)
+    end_dt = _parse_dt_param(to, is_start=False)
     if start_dt and end_dt and end_dt < start_dt:
         raise HTTPException(400, '"to" must be on or after "from".')
     output = io.StringIO()
@@ -803,6 +880,199 @@ def export_csv(
     output.seek(0)
     return StreamingResponse(output, media_type="text/csv",
                              headers={"Content-Disposition": "attachment; filename=weigh_export.csv"})
+
+
+@app.get("/api/export/events", response_model=WeighEventListOut)
+def list_export_events(
+    request: Request,
+    frm: Optional[str] = Query(default=None, alias="from"),
+    to: Optional[str] = None,
+    variant: Optional[int] = None,
+    operator: Optional[str] = None,
+    limit: int = Query(200, ge=1, le=1000),
+):
+    frm = frm or request.query_params.get("frm")
+    operator_clean = (operator or "").strip() or None
+    start_dt = _parse_dt_param(frm, is_start=True)
+    end_dt = _parse_dt_param(to, is_start=False)
+    if start_dt and end_dt and end_dt < start_dt:
+        raise HTTPException(400, '"to" must be on or after "from".')
+
+    with Session() as s:
+        ts_expr = cast(WeighEvent.ts, String).label("ts_text")
+        stmt = (
+            select(
+                WeighEvent.id.label("id"),
+                ts_expr,
+                WeighEvent.variant_id.label("variant_id"),
+                Variant.name.label("variant_name"),
+                WeighEvent.moulding_serial.label("moulding_serial"),
+                WeighEvent.serial.label("serial"),
+                WeighEvent.contract.label("contract"),
+                WeighEvent.order_number.label("order_number"),
+                WeighEvent.operator.label("operator"),
+                WeighEvent.colour.label("colour"),
+                WeighEvent.notes.label("notes"),
+                WeighEvent.gross_g.label("gross_g"),
+                WeighEvent.net_g.label("net_g"),
+                WeighEvent.in_range.label("in_range"),
+            )
+            .select_from(WeighEvent)
+            .join(Variant, Variant.id == WeighEvent.variant_id, isouter=True)
+        )
+
+        if variant:
+            stmt = stmt.where(WeighEvent.variant_id == variant)
+        if operator_clean:
+            stmt = stmt.where(WeighEvent.operator == operator_clean)
+        if start_dt:
+            stmt = stmt.where(WeighEvent.ts >= start_dt)
+        if end_dt:
+            stmt = stmt.where(WeighEvent.ts <= end_dt)
+
+        stmt = stmt.order_by(WeighEvent.ts.desc()).limit(limit + 1)
+        rows = s.execute(stmt).mappings().all()
+        has_more = len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+
+        errors: List[str] = []
+        payload_items: List[WeighEventOut] = []
+
+        def _coerce_float(value: Any, label: str, event_id: int) -> Optional[float]:
+            if value in (None, "", " "):
+                return None
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError) as exc:
+                message = f"Event {event_id} has invalid {label}: {value!r} ({exc})"
+                errors.append(message)
+                logger.warning(message, exc_info=True)
+                return None
+            if math.isnan(numeric) or math.isinf(numeric):
+                message = f"Event {event_id} has non-finite {label}: {numeric!r}"
+                errors.append(message)
+                logger.warning(message)
+                return None
+            return numeric
+
+        def _coerce_int(value: Any, label: str, event_id: int) -> Optional[int]:
+            if value is None or value == "":
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError) as exc:
+                message = f"Event {event_id} has invalid {label}: {value!r} ({exc})"
+                errors.append(message)
+                logger.warning(message, exc_info=True)
+                return None
+
+        def _coerce_text(
+            value: Any, label: str, event_id: int, *, allow_empty: bool = True
+        ) -> Optional[str]:
+            if value is None:
+                return None
+            if isinstance(value, bytes):
+                try:
+                    value = value.decode("utf-8")
+                except UnicodeDecodeError:
+                    decoded = value.decode("utf-8", errors="replace")
+                    message = (
+                        f"Event {event_id} had non-UTF8 {label}; characters were replaced for display."
+                    )
+                    errors.append(message)
+                    logger.warning(message)
+                    value = decoded
+            text_value = str(value).strip()
+            if not text_value:
+                if not allow_empty:
+                    errors.append(f"Event {event_id} has an empty {label}.")
+                return None
+            return text_value
+
+        def _format_timestamp(raw_value: Any, event_id: int) -> Optional[str]:
+            if raw_value in (None, "", " "):
+                errors.append(f"Event {event_id} is missing a timestamp.")
+                return None
+
+            if isinstance(raw_value, datetime):
+                return raw_value.isoformat()
+
+            text_value = str(raw_value).strip()
+            if not text_value:
+                errors.append(f"Event {event_id} has an empty timestamp value.")
+                return None
+
+            candidates = [text_value]
+            if "T" not in text_value and " " in text_value:
+                candidates.append(text_value.replace(" ", "T"))
+
+            for candidate in candidates:
+                try:
+                    return datetime.fromisoformat(candidate).isoformat()
+                except ValueError:
+                    continue
+
+            message = (
+                f"Event {event_id} timestamp could not be parsed; returning original value."
+            )
+            errors.append(message)
+            logger.warning(message)
+            return text_value
+
+        for row in rows:
+            event_id = _coerce_int(row.get("id"), "event id", row.get("id", 0)) or 0
+            in_range_bool, result_label = _normalize_in_range(row.get("in_range"))
+            serial_value = _coerce_text(row.get("serial"), "serial", event_id, allow_empty=False)
+
+            item_data = dict(
+                id=event_id,
+                ts=_format_timestamp(row.get("ts_text"), event_id),
+                variant_id=_coerce_int(row.get("variant_id"), "variant id", event_id),
+                variant_name=_coerce_text(row.get("variant_name"), "variant name", event_id),
+                moulding_serial=_coerce_text(
+                    row.get("moulding_serial"), "moulding serial", event_id
+                ),
+                serial=serial_value,
+                contract=_coerce_text(row.get("contract"), "contract", event_id),
+                order_number=_coerce_text(
+                    row.get("order_number"), "order number", event_id
+                ),
+                operator=_coerce_text(row.get("operator"), "operator", event_id),
+                colour=_coerce_text(row.get("colour"), "colour", event_id),
+                notes=_coerce_text(row.get("notes"), "notes", event_id),
+                gross_g=_coerce_float(row.get("gross_g"), "gross weight", event_id),
+                net_g=_coerce_float(row.get("net_g"), "net weight", event_id),
+                in_range=in_range_bool,
+                result_label=result_label,
+            )
+
+            try:
+                payload_items.append(WeighEventOut(**item_data))
+            except Exception as exc:  # pragma: no cover - defensive
+                message = (
+                    f"Event {item_data.get('id', 'unknown')} could not be serialised: {exc}"
+                )
+                errors.append(message)
+                logger.warning(message, exc_info=True)
+
+    return WeighEventListOut(
+        items=payload_items,
+        count=len(payload_items),
+        has_more=has_more,
+        errors=errors,
+    )
+
+
+@app.delete("/api/export/events/{event_id}")
+def delete_export_event(event_id: int):
+    with Session() as s:
+        evt = s.get(WeighEvent, event_id)
+        if not evt:
+            raise HTTPException(404, "Event not found")
+        s.delete(evt)
+        s.commit()
+    return {"ok": True, "id": event_id}
 # Debug: latest reading (for polling fallback / quick checks)
 @app.get("/api/debug/latest")
 def debug_latest():

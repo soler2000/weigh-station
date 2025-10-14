@@ -13,6 +13,14 @@
     .export-actions { display:flex; gap:12px; flex-wrap:wrap; }
     .export-actions button { min-width:160px; }
     #status { min-height:1.4em; color:var(--app-fg-muted); }
+    .results-card { display:flex; flex-direction:column; gap:16px; }
+    .results-header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; }
+    .results-summary { font-size:0.85rem; color:var(--app-fg-muted); }
+    .results-empty { margin:0; font-style:italic; color:var(--app-fg-muted); }
+    .results-errors { margin:0; color:#f87171; font-size:0.82rem; }
+    .results-actions { text-align:right; }
+    .btn-small { padding:6px 10px; font-size:0.78rem; }
+    .version-banner { font-size:0.75rem; letter-spacing:0.05em; text-transform:uppercase; color:var(--app-accent); }
   </style>
 </head>
 <body class="app dark">
@@ -35,6 +43,7 @@
     <section class="card">
       <div class="export-layout">
         <div>
+          <p class="version-banner" aria-label="Export page version">Export UI version 2024.05.24</p>
           <h1 style="margin-bottom:6px;">Export weigh data</h1>
           <p class="muted" style="margin:0; max-width:560px;">Choose the filters that match the report you need. Leave a field blank to include all results. When you click Export, a CSV file will be prepared using the selected criteria.</p>
         </div>
@@ -61,14 +70,41 @@
           </div>
           <div class="export-actions">
             <button type="submit" id="downloadBtn">Export CSV</button>
+            <button type="button" id="showBtn" class="secondary">Show records</button>
             <button type="button" id="resetBtn" class="secondary">Reset filters</button>
           </div>
           <div id="status" class="muted"></div>
         </form>
       </div>
     </section>
+    <section class="card" id="resultsSection" hidden>
+      <div class="results-card">
+        <div class="results-header">
+          <h2 style="margin:0;">Filtered records</h2>
+          <span id="resultsSummary" class="results-summary"></span>
+        </div>
+        <p id="resultsErrors" class="results-errors" hidden></p>
+        <div class="table-scroll compact" id="resultsTableWrapper" hidden>
+          <table class="compact">
+            <thead>
+              <tr>
+                <th scope="col">Timestamp</th>
+                <th scope="col">Variant</th>
+                <th scope="col">Serial</th>
+                <th scope="col">Operator</th>
+                <th scope="col">Net (g)</th>
+                <th scope="col">Result</th>
+                <th scope="col" class="results-actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="resultsBody"></tbody>
+          </table>
+        </div>
+        <p id="resultsEmpty" class="results-empty" hidden>No records match the selected filters.</p>
+      </div>
+    </section>
   </main>
 
-  <script src="/static/export.js"></script>
+  <script src="/static/export.js?v=2024.05.24"></script>
 </body>
 </html>
