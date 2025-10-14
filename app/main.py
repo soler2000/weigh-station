@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, select, func, case, or_, cast, String
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from app.models import Base, Variant, Calibration, WeighEvent, Colour
 from app.hx711_reader import ScaleReader, ADCNotReadyError
@@ -285,7 +286,7 @@ def list_colours():
         return [ColourOut(id=row.id, name=row.name) for row in rows]
 
 
-@app.post("/api/colours", response_model=ColourOut)
+@app.post("/api/colours", response_model=ColourOut, status_code=201)
 def create_colour(payload: ColourIn):
     name_clean = (payload.name or "").strip()
     if not name_clean:
@@ -300,7 +301,11 @@ def create_colour(payload: ColourIn):
             raise HTTPException(409, "Colour already exists.")
         row = Colour(name=name_clean)
         s.add(row)
-        s.commit()
+        try:
+            s.commit()
+        except IntegrityError as exc:
+            s.rollback()
+            raise HTTPException(409, "Colour already exists.") from exc
         s.refresh(row)
         return ColourOut(id=row.id, name=row.name)
 
@@ -322,7 +327,11 @@ def update_colour(colour_id: int = FPath(..., ge=1), payload: ColourIn = ...):
         if duplicate:
             raise HTTPException(409, "Colour already exists.")
         row.name = name_clean
-        s.commit()
+        try:
+            s.commit()
+        except IntegrityError as exc:
+            s.rollback()
+            raise HTTPException(409, "Colour already exists.") from exc
         s.refresh(row)
         return ColourOut(id=row.id, name=row.name)
 

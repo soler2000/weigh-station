@@ -1,7 +1,19 @@
 const variantTbody = document.querySelector('#variants tbody');
-const colourTbody = document.querySelector('#colours tbody');
-const colourSummaryTbody = document.querySelector('#colourChoices tbody');
-const colourSummaryEmpty = document.getElementById('colourSummaryEmpty');
+let colourTbody = null;
+let colourSummaryTbody = null;
+let colourSummaryEmpty = null;
+
+function ensureColourElements() {
+  if (!colourTbody) {
+    colourTbody = document.querySelector('#colours tbody');
+  }
+  if (!colourSummaryTbody) {
+    colourSummaryTbody = document.querySelector('#colourChoices tbody');
+  }
+  if (!colourSummaryEmpty) {
+    colourSummaryEmpty = document.getElementById('colourSummaryEmpty');
+  }
+}
 
 async function loadVariantTable() {
   const vs = await (await fetch('/api/variants')).json();
@@ -49,12 +61,16 @@ function bindVariantRowHandlers() {
 }
 
 async function loadColourTable() {
+  ensureColourElements();
+  if (!colourTbody) return;
   try {
     const url = `/api/colours?ts=${Date.now()}`;
     const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) {
       console.error('Failed to load colours', res.status);
       colourTbody.innerHTML = '';
+      if (colourSummaryTbody) colourSummaryTbody.innerHTML = '';
+      if (colourSummaryEmpty) colourSummaryEmpty.hidden = false;
       alert('Unable to load colours. Please refresh and try again.');
       return;
     }
@@ -94,6 +110,8 @@ function colourSummaryRowHtml(row) {
 }
 
 function bindColourRowHandlers() {
+  ensureColourElements();
+  if (!colourTbody) return;
   colourTbody.querySelectorAll('.save').forEach(btn => btn.onclick = async (e) => {
     const tr = e.target.closest('tr');
     const id = tr.dataset.id;
@@ -103,14 +121,22 @@ function bindColourRowHandlers() {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name })
     });
-    if (!res.ok) alert('Save failed');
+    if (res.ok) {
+      await loadColourTable();
+    } else {
+      alert('Save failed');
+    }
   });
   colourTbody.querySelectorAll('.del').forEach(btn => btn.onclick = async (e) => {
     const tr = e.target.closest('tr');
     const id = tr.dataset.id;
     if (!confirm('Delete this colour?')) return;
     const res = await fetch(`/api/colours/${id}`, { method: 'DELETE' });
-    if (res.ok) tr.remove(); else alert('Delete failed');
+    if (res.ok) {
+      await loadColourTable();
+    } else {
+      alert('Delete failed');
+    }
   });
 }
 
@@ -144,7 +170,7 @@ document.getElementById('c-add').onclick = async () => {
   });
   if (res.ok) {
     document.getElementById('c-name').value = '';
-    loadColourTable();
+    await loadColourTable();
   } else if (res.status === 409) {
     alert('Colour already exists.');
   } else {
@@ -173,6 +199,7 @@ document.getElementById('btn-factory-reset').onclick = async () => {
 };
 
 window.addEventListener('load', () => {
+  ensureColourElements();
   loadVariantTable();
   loadColourTable();
 });
