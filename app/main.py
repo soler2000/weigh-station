@@ -834,7 +834,7 @@ def list_export_events(
     with Session() as s:
         q = (
             s.query(WeighEvent, Variant)
-            .join(Variant, Variant.id == WeighEvent.variant_id)
+            .join(Variant, Variant.id == WeighEvent.variant_id, isouter=True)
         )
         if variant:
             q = q.filter(WeighEvent.variant_id == variant)
@@ -856,7 +856,7 @@ def list_export_events(
                 id=evt.id,
                 ts=evt.ts.isoformat(),
                 variant_id=evt.variant_id,
-                variant_name=var.name,
+                variant_name=(var.name if var else None),
                 moulding_serial=evt.moulding_serial,
                 serial=evt.serial,
                 contract=evt.contract,
