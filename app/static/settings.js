@@ -50,7 +50,8 @@ function bindVariantRowHandlers() {
 
 async function loadColourTable() {
   try {
-    const res = await fetch('/api/colours', { cache: 'no-store' });
+    const url = `/api/colours?ts=${Date.now()}`;
+    const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) {
       console.error('Failed to load colours', res.status);
       colourTbody.innerHTML = '';

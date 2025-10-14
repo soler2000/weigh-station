@@ -207,7 +207,8 @@ function readSticky(){
 
 async function loadColours(){
   try{
-    const res = await fetch('/api/colours',{cache:'no-store'});
+    const url = `/api/colours?ts=${Date.now()}`;
+    const res = await fetch(url,{cache:'no-store'});
     if(!res.ok) throw new Error('Colour request failed');
     let items = await res.json();
     if(items && Array.isArray(items.items)) items = items.items;
