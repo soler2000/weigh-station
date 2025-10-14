@@ -1,12 +1,13 @@
-const tbody = document.querySelector('#variants tbody');
+const variantTbody = document.querySelector('#variants tbody');
+const colourTbody = document.querySelector('#colours tbody');
 
-async function loadTable() {
+async function loadVariantTable() {
   const vs = await (await fetch('/api/variants')).json();
-  tbody.innerHTML = vs.map(v => rowHtml(v)).join('');
-  bindRowHandlers();
+  variantTbody.innerHTML = vs.map(v => variantRowHtml(v)).join('');
+  bindVariantRowHandlers();
 }
 
-function rowHtml(v) {
+function variantRowHtml(v) {
   return `<tr data-id="${v.id}">
     <td>${v.id}</td>
     <td><input class="name" value="${escapeHtml(v.name)}"></td>
@@ -19,8 +20,8 @@ function rowHtml(v) {
   </tr>`;
 }
 
-function bindRowHandlers() {
-  tbody.querySelectorAll('.save').forEach(btn => btn.onclick = async (e) => {
+function bindVariantRowHandlers() {
+  variantTbody.querySelectorAll('.save').forEach(btn => btn.onclick = async (e) => {
     const tr = e.target.closest('tr');
     const id = tr.dataset.id;
     const body = {
@@ -36,11 +37,49 @@ function bindRowHandlers() {
     });
     if (!res.ok) alert('Save failed');
   });
-  tbody.querySelectorAll('.del').forEach(btn => btn.onclick = async (e) => {
+  variantTbody.querySelectorAll('.del').forEach(btn => btn.onclick = async (e) => {
     const tr = e.target.closest('tr');
     const id = tr.dataset.id;
     if (!confirm('Delete this variant?')) return;
     const res = await fetch(`/api/variants/${id}`, { method: 'DELETE' });
+    if (res.ok) tr.remove(); else alert('Delete failed');
+  });
+}
+
+async function loadColourTable() {
+  const rows = await (await fetch('/api/colours')).json();
+  colourTbody.innerHTML = rows.map(r => colourRowHtml(r)).join('');
+  bindColourRowHandlers();
+}
+
+function colourRowHtml(row) {
+  return `<tr data-id="${row.id}">
+    <td>${row.id}</td>
+    <td><input class="name" value="${escapeHtml(row.name)}"></td>
+    <td>
+      <button class="save">Save</button>
+      <button class="del">Delete</button>
+    </td>
+  </tr>`;
+}
+
+function bindColourRowHandlers() {
+  colourTbody.querySelectorAll('.save').forEach(btn => btn.onclick = async (e) => {
+    const tr = e.target.closest('tr');
+    const id = tr.dataset.id;
+    const name = tr.querySelector('.name').value.trim();
+    if (!name) { alert('Enter a colour name.'); return; }
+    const res = await fetch(`/api/colours/${id}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name })
+    });
+    if (!res.ok) alert('Save failed');
+  });
+  colourTbody.querySelectorAll('.del').forEach(btn => btn.onclick = async (e) => {
+    const tr = e.target.closest('tr');
+    const id = tr.dataset.id;
+    if (!confirm('Delete this colour?')) return;
+    const res = await fetch(`/api/colours/${id}`, { method: 'DELETE' });
     if (res.ok) tr.remove(); else alert('Delete failed');
   });
 }
@@ -62,8 +101,25 @@ document.getElementById('v-add').onclick = async () => {
     document.getElementById('v-name').value = '';
     document.getElementById('v-min').value = '';
     document.getElementById('v-max').value = '';
-    loadTable();
+    loadVariantTable();
   } else alert('Add failed');
+};
+
+document.getElementById('c-add').onclick = async () => {
+  const name = document.getElementById('c-name').value.trim();
+  if (!name) return alert('Enter a colour name');
+  const res = await fetch('/api/colours', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name })
+  });
+  if (res.ok) {
+    document.getElementById('c-name').value = '';
+    loadColourTable();
+  } else if (res.status === 409) {
+    alert('Colour already exists.');
+  } else {
+    alert('Add failed');
+  }
 };
 
 document.getElementById('btn-del-events').onclick = async () => {
@@ -79,10 +135,14 @@ document.getElementById('btn-factory-reset').onclick = async () => {
   const res = await fetch('/api/admin/factory-reset?confirm=RESET', { method: 'POST' });
   if (res.ok) {
     alert('Factory reset complete. Variants reseeded.');
-    loadTable();
+    loadVariantTable();
+    loadColourTable();
   } else {
     alert('Factory reset failed.');
   }
 };
 
-window.addEventListener('load', loadTable);
+window.addEventListener('load', () => {
+  loadVariantTable();
+  loadColourTable();
+});

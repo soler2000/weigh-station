@@ -35,6 +35,10 @@ function updateColor(g) {
   const opt = sel.options[sel.selectedIndex];
   if (!opt) { panel.className = 'neutral'; return; }
   const min = parseFloat(opt.dataset.min), max = parseFloat(opt.dataset.max);
+  if (Math.abs(g) < 5) {
+    panel.className = 'neutral';
+    return;
+  }
   panel.className = (g >= min && g <= max) ? 'green' : 'red';
 }
 
@@ -82,16 +86,42 @@ form?.addEventListener('submit', async (e) => {
   const variant_id = sel.value;
   const s = serial.value.trim();
   if (!s) { alert('Serial cannot be blank.'); serial.focus(); return; }
-  const res = await fetch(`/api/weigh/commit?variant_id=${encodeURIComponent(variant_id)}&serial=${encodeURIComponent(s)}`, { method: 'POST' });
-  if (res.ok) {
+  const params = new URLSearchParams({ variant_id, serial: s });
+  const submit = (qs) => fetch(`/api/weigh/commit?${qs}`, { method: 'POST' });
+  const attempt = await submit(params.toString());
+  if (attempt.status === 409) {
+    let detail = null;
+    try { detail = await attempt.json(); } catch {}
+    const message = (detail && typeof detail === 'object')
+      ? (detail.detail?.message || detail.message || detail.detail)
+      : null;
+    const promptMsg = message
+      ? `${message} Update the existing record with the new values?`
+      : 'Duplicate serial detected. Update the existing record with the new values?';
+    if (confirm(promptMsg)) {
+      params.set('overwrite', 'true');
+      const overwriteRes = await submit(params.toString());
+      if (!overwriteRes.ok) { alert('Save failed.'); return; }
+      serial.value = '';
+      serial.focus();
+      refreshStats();
+    } else {
+      alert('Save cancelled — existing record not updated.');
+      serial.focus();
+    }
+    return;
+  }
+  if (attempt.ok) {
     serial.value = '';
     serial.focus();
     refreshStats();
+  } else if (attempt.status === 400) {
+    alert('Serial cannot be blank.');
+    serial.focus();
+  } else if (attempt.status === 404) {
+    alert('Variant not found.');
   } else {
-    if (res.status === 409) alert('This serial was already used. Please scan a new one.');
-    else if (res.status === 400) alert('Serial cannot be blank.');
-    else if (res.status === 404) alert('Variant not found.');
-    else alert('Save failed.');
+    alert('Save failed.');
   }
 });
 

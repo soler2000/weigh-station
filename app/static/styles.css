@@ -209,6 +209,21 @@ textarea {
     background 0.2s ease, transform 0.15s ease;
 }
 
+select {
+  color: #1f2937;
+  background: #e2e8f0;
+}
+
+select option {
+  color: #1f2937;
+  background-color: #f8fafc;
+}
+
+body.app.dark select {
+  color: #1f2937;
+  background: #e2e8f0;
+}
+
 .filters .field input,
 .filters .field select {
   height: 42px;
