@@ -11,6 +11,7 @@ const resultsTableWrapper = document.getElementById('resultsTableWrapper');
 const resultsBody = document.getElementById('resultsBody');
 const resultsEmpty = document.getElementById('resultsEmpty');
 const resultsSummary = document.getElementById('resultsSummary');
+const resultsErrors = document.getElementById('resultsErrors');
 
 function setStatus(message, isError = false) {
   if (!statusEl) return;
@@ -97,6 +98,10 @@ function clearResults() {
   if (resultsTableWrapper) {
     resultsTableWrapper.hidden = true;
   }
+  if (resultsErrors) {
+    resultsErrors.hidden = true;
+    resultsErrors.textContent = '';
+  }
   if (resultsSection) {
     resultsSection.hidden = true;
   }
@@ -110,8 +115,14 @@ function formatTimestamp(value) {
 }
 
 function formatNetWeight(value) {
-  if (typeof value !== 'number') return '';
-  return value.toFixed(2);
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value.toFixed(2);
+  }
+  const numeric = Number(value);
+  if (!Number.isNaN(numeric) && Number.isFinite(numeric)) {
+    return numeric.toFixed(2);
+  }
+  return '';
 }
 
 function formatResult(evt) {
@@ -129,13 +140,29 @@ function renderResults(payload) {
   }
   const items = Array.isArray(payload?.items) ? payload.items : [];
   const hasMore = Boolean(payload?.has_more);
+  const errors = Array.isArray(payload?.errors) ? payload.errors : [];
   resultsSection.hidden = false;
   resultsBody.innerHTML = '';
 
   if (items.length === 0) {
-    resultsSummary.textContent = 'No records to display.';
+    const summary = errors.length
+      ? 'No records could be displayed. Check the warnings below.'
+      : 'No records to display.';
+    resultsSummary.textContent = summary;
     resultsTableWrapper.hidden = true;
     resultsEmpty.hidden = false;
+    if (resultsErrors) {
+      if (errors.length) {
+        const first = errors[0];
+        const extra = errors.length > 1 ? ` (+${errors.length - 1} more)` : '';
+        resultsErrors.textContent = `Warnings: ${first}${extra}`;
+        resultsErrors.hidden = false;
+        console.warn('Export preview warnings:', errors);
+      } else {
+        resultsErrors.hidden = true;
+        resultsErrors.textContent = '';
+      }
+    }
     return;
   }
 
@@ -145,7 +172,23 @@ function renderResults(payload) {
   if (hasMore) {
     summaryParts.push('Refine your filters to see older records.');
   }
+  if (errors.length) {
+    summaryParts.push(`${errors.length} warning${errors.length === 1 ? '' : 's'} detected.`);
+  }
   resultsSummary.textContent = summaryParts.join(' ');
+
+  if (resultsErrors) {
+    if (errors.length) {
+      const first = errors[0];
+      const extra = errors.length > 1 ? ` (+${errors.length - 1} more)` : '';
+      resultsErrors.textContent = `Warnings: ${first}${extra}`;
+      resultsErrors.hidden = false;
+      console.warn('Export preview warnings:', errors);
+    } else {
+      resultsErrors.hidden = true;
+      resultsErrors.textContent = '';
+    }
+  }
 
   for (const evt of items) {
     const row = document.createElement('tr');
@@ -153,7 +196,18 @@ function renderResults(payload) {
 
     const cells = [
       formatTimestamp(evt.ts),
-      evt.variant_name ? `${evt.variant_name} (#${evt.variant_id})` : `Variant ${evt.variant_id}`,
+      (() => {
+        if (evt.variant_name && (evt.variant_id ?? null) !== null && evt.variant_id !== undefined) {
+          return `${evt.variant_name} (#${evt.variant_id})`;
+        }
+        if (evt.variant_name) {
+          return evt.variant_name;
+        }
+        if (evt.variant_id !== null && evt.variant_id !== undefined) {
+          return `Variant ${evt.variant_id}`;
+        }
+        return 'Unknown variant';
+      })(),
       evt.serial || '—',
       evt.operator || '—',
       formatNetWeight(evt.net_g),
@@ -184,12 +238,40 @@ function renderResults(payload) {
 async function loadRecords() {
   const url = buildUrl('/api/export/events');
   const res = await fetch(url, { cache: 'no-store' });
-  if (!res.ok) {
-    throw new Error('Failed to load records');
+  const text = await res.text();
+  let payload = null;
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch (err) {
+      console.error('Failed to parse export preview response.', err, text);
+      throw new Error('Received an invalid response from the server.');
+    }
   }
-  const payload = await res.json();
-  renderResults(payload);
-  return payload;
+
+  if (!res.ok) {
+    let detail = '';
+    if (payload && typeof payload === 'object') {
+      if (payload.detail) {
+        if (Array.isArray(payload.detail)) {
+          detail = payload.detail.map((entry) => entry?.msg || String(entry)).join('; ');
+        } else {
+          detail = String(payload.detail);
+        }
+      } else if (Array.isArray(payload.errors) && payload.errors.length) {
+        detail = payload.errors.join('; ');
+      }
+    }
+    if (!detail && text) {
+      detail = text.trim().slice(0, 200);
+    }
+    const message = detail ? `Failed to load records: ${detail}` : `Failed to load records (HTTP ${res.status})`;
+    throw new Error(message);
+  }
+
+  const safePayload = payload && typeof payload === 'object' ? payload : { items: [], count: 0, has_more: false, errors: [] };
+  renderResults(safePayload);
+  return safePayload;
 }
 
 function attachDeleteHandler(button, id) {
@@ -249,17 +331,27 @@ showBtn?.addEventListener('click', async () => {
   try {
     const payload = await loadRecords();
     if (!payload || payload.count === 0) {
-      setStatus('No records match the selected filters.');
+      const warning = Array.isArray(payload?.errors) && payload.errors.length
+        ? 'No records matched the filters, but warnings were reported. Review the console for details.'
+        : 'No records match the selected filters.';
+      setStatus(warning, Boolean(payload?.errors?.length));
     } else {
       let message = `Showing ${payload.count} record${payload.count === 1 ? '' : 's'}.`;
       if (payload.has_more) {
         message += ' Refine your filters to load additional results.';
       }
-      setStatus(message);
+      if (Array.isArray(payload.errors) && payload.errors.length) {
+        message += ` ${payload.errors.length} warning${payload.errors.length === 1 ? '' : 's'} logged.`;
+        setStatus(message, true);
+        console.warn('Export preview warnings:', payload.errors);
+      } else {
+        setStatus(message);
+      }
     }
   } catch (err) {
     console.error(err);
-    setStatus('Unable to load records.', true);
+    const message = err instanceof Error && err.message ? err.message : 'Unable to load records.';
+    setStatus(message, true);
   } finally {
     showBtn.disabled = false;
     showBtn.textContent = originalText;

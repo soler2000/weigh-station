@@ -17,6 +17,7 @@
     .results-header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; }
     .results-summary { font-size:0.85rem; color:var(--app-fg-muted); }
     .results-empty { margin:0; font-style:italic; color:var(--app-fg-muted); }
+    .results-errors { margin:0; color:#f87171; font-size:0.82rem; }
     .results-actions { text-align:right; }
     .btn-small { padding:6px 10px; font-size:0.78rem; }
   </style>
@@ -80,6 +81,7 @@
           <h2 style="margin:0;">Filtered records</h2>
           <span id="resultsSummary" class="results-summary"></span>
         </div>
+        <p id="resultsErrors" class="results-errors" hidden></p>
         <div class="table-scroll compact" id="resultsTableWrapper" hidden>
           <table class="compact">
             <thead>

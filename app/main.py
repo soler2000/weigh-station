@@ -1,4 +1,5 @@
 import asyncio, csv, io, os
+import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
 from pathlib import Path
 from datetime import date, datetime, timedelta, time
@@ -72,6 +73,9 @@ def _ensure_schema_migrations() -> None:
 
 
 _ensure_schema_migrations()
+
+
+logger = logging.getLogger(__name__)
 
 
 app = FastAPI(title="Weigh Station")
@@ -204,18 +208,18 @@ class ColourOut(ColourIn):
     id: int
 class WeighEventOut(BaseModel):
     id: int
-    ts: str
-    variant_id: int
+    ts: Optional[str] = None
+    variant_id: Optional[int] = None
     variant_name: Optional[str] = None
     moulding_serial: Optional[str] = None
-    serial: str
+    serial: Optional[str] = None
     contract: Optional[str] = None
     order_number: Optional[str] = None
     operator: Optional[str] = None
     colour: Optional[str] = None
     notes: Optional[str] = None
-    gross_g: float
-    net_g: float
+    gross_g: Optional[float] = None
+    net_g: Optional[float] = None
     in_range: Optional[bool] = None
     result_label: str
 
@@ -224,6 +228,7 @@ class WeighEventListOut(BaseModel):
     items: List[WeighEventOut]
     count: int
     has_more: bool = False
+    errors: List[str] = Field(default_factory=list)
 # --- Scale reader boot
 reader = ScaleReader()  # pin names via env: DATA_PIN, CLOCK_PIN
 with Session() as s:
@@ -913,37 +918,70 @@ def list_export_events(
         if has_more:
             rows = rows[:limit]
 
-        normalized_rows = [
-            (
-                evt,
-                var,
-                *_normalize_in_range(evt.in_range),
-            )
-            for evt, var in rows
-        ]
+        errors: List[str] = []
+        payload_items: List[WeighEventOut] = []
 
-        payload_items = [
-            WeighEventOut(
-                id=evt.id,
-                ts=evt.ts.isoformat(),
-                variant_id=evt.variant_id,
+        def _coerce_float(value: Any, label: str, event_id: int) -> Optional[float]:
+            if value in (None, "", " "):
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError) as exc:
+                message = f"Event {event_id} has invalid {label}: {value!r} ({exc})"
+                errors.append(message)
+                logger.exception(message)
+                return None
+
+        def _serialize_ts(event: WeighEvent) -> Optional[str]:
+            ts_value = getattr(event, "ts", None)
+            if ts_value is None:
+                errors.append(f"Event {event.id} is missing a timestamp.")
+                return None
+            try:
+                return ts_value.isoformat()
+            except Exception as exc:  # pragma: no cover - defensive path
+                message = f"Event {event.id} timestamp could not be formatted: {exc}"
+                errors.append(message)
+                logger.exception(message)
+                return None
+
+        for evt, var in rows:
+            in_range_bool, result_label = _normalize_in_range(evt.in_range)
+            serial_value = (evt.serial or "").strip() or None
+            if serial_value is None:
+                errors.append(f"Event {evt.id} has an empty serial.")
+
+            item_data = dict(
+                id=int(evt.id),
+                ts=_serialize_ts(evt),
+                variant_id=getattr(evt, "variant_id", None),
                 variant_name=(var.name if var else None),
-                moulding_serial=evt.moulding_serial,
-                serial=evt.serial,
-                contract=evt.contract,
-                order_number=evt.order_number,
-                operator=evt.operator,
-                colour=evt.colour,
-                notes=evt.notes,
-                gross_g=evt.gross_g,
-                net_g=evt.net_g,
+                moulding_serial=(evt.moulding_serial or None),
+                serial=serial_value,
+                contract=(evt.contract or None),
+                order_number=(evt.order_number or None),
+                operator=(evt.operator or None),
+                colour=(evt.colour or None),
+                notes=(evt.notes or None),
+                gross_g=_coerce_float(evt.gross_g, "gross weight", evt.id),
+                net_g=_coerce_float(evt.net_g, "net weight", evt.id),
                 in_range=in_range_bool,
                 result_label=result_label,
             )
-            for evt, var, in_range_bool, result_label in normalized_rows
-        ]
 
-    return WeighEventListOut(items=payload_items, count=len(payload_items), has_more=has_more)
+            try:
+                payload_items.append(WeighEventOut(**item_data))
+            except Exception as exc:  # pragma: no cover - defensive
+                message = f"Event {item_data.get('id', 'unknown')} could not be serialised: {exc}"
+                errors.append(message)
+                logger.exception(message)
+
+    return WeighEventListOut(
+        items=payload_items,
+        count=len(payload_items),
+        has_more=has_more,
+        errors=errors,
+    )
 
 
 @app.delete("/api/export/events/{event_id}")
