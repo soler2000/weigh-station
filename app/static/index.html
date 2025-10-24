@@ -15,9 +15,9 @@
 
     .reading-card{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:40vh}
     .reading{font-weight:800;font-size:clamp(56px,12vw,144px);line-height:1;letter-spacing:-.02em}
-    .reading-sub{opacity:.85;margin-top:6px;color:#cbd5f5}
-    .status--pass{ background: rgba(35,173,78,.08) }  /* soft green tint */
-    .status--fail{ background: rgba(214,57,57,.08) } /* soft red tint  */
+    .reading-sub{opacity:.85;margin-top:6px;color:inherit}
+    .status--pass{background:linear-gradient(135deg,#00ff3b 0%,#00c300 100%);color:#000;border-color:rgba(0,201,78,.72);box-shadow:0 0 0 3px rgba(0,255,98,.35),0 24px 64px rgba(0,150,60,.55)}
+    .status--fail{background:linear-gradient(135deg,#ff3a2f 0%,#d10000 100%);color:#000;border-color:rgba(245,53,0,.7);box-shadow:0 0 0 3px rgba(255,82,59,.4),0 24px 64px rgba(172,0,0,.6)}
 
     .weight-bounds{margin-top:22px;display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:14px;width:100%;max-width:420px}
     .weight-bound{background:rgba(255,255,255,.04);border-radius:14px;padding:12px 16px;text-align:center}
@@ -29,7 +29,7 @@
     .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
     .kpis{display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:12px;margin-top:12px}
     .kpis .num{font-weight:700;font-size:clamp(20px,3.5vw,32px);text-align:center}
-    .status-msg{min-height:2.4em;margin-bottom:18px;font-size:2rem;line-height:1.2;font-weight:600;text-align:center;color:#e2e8f0}
+    .status-msg{min-height:2.4em;margin-bottom:18px;font-size:2rem;line-height:1.2;font-weight:600;text-align:center;color:inherit}
   </style>
 </head>
 <body class="app dark">

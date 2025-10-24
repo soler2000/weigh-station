@@ -400,11 +400,21 @@ tbody tr:hover {
 }
 
 .status--pass {
-  background: linear-gradient(135deg, rgba(34, 197, 94, 0.22), rgba(22, 163, 74, 0.16));
+  background: linear-gradient(135deg, #00ff3b 0%, #00c300 100%);
+  color: #000;
+  border-color: rgba(0, 201, 78, 0.72);
+  box-shadow:
+    0 0 0 3px rgba(0, 255, 98, 0.35),
+    0 24px 64px rgba(0, 150, 60, 0.55);
 }
 
 .status--fail {
-  background: linear-gradient(135deg, rgba(239, 68, 68, 0.24), rgba(220, 38, 38, 0.16));
+  background: linear-gradient(135deg, #ff3a2f 0%, #d10000 100%);
+  color: #000;
+  border-color: rgba(245, 53, 0, 0.7);
+  box-shadow:
+    0 0 0 3px rgba(255, 82, 59, 0.4),
+    0 24px 64px rgba(172, 0, 0, 0.6);
 }
 
 /* Legacy weigh panel (app.js fallback) */
@@ -420,11 +430,13 @@ tbody tr:hover {
 }
 
 #panel.green {
-  background: rgba(34, 197, 94, 0.35);
+  background: radial-gradient(circle at 25% 25%, #00ff55 0%, #00c300 60%, #009800 100%);
+  color: #000;
 }
 
 #panel.red {
-  background: rgba(239, 68, 68, 0.35);
+  background: radial-gradient(circle at 25% 25%, #ff4b33 0%, #d10000 60%, #8c0000 100%);
+  color: #000;
 }
 
 #panel.neutral {
